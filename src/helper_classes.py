@@ -72,13 +72,8 @@ class Feature():
         else:
             self.db.assert_loaded()
             _, indices, values = self.db._get_tiv_parts(self.hook_name)
-            # Convert feature_id to numpy array for efficient comparison
-            feature_id_array = np.array([self.feature_id], dtype=indices.dtype)
-            # Use numpy's vectorized operations
-            feature_mask = np.isin(indices, feature_id_array)
-            # Use any() along axis 2 to find where the feature is active
+            feature_mask = indices == self.feature_id
             feature_activations = np.where(feature_mask, values, 0)
-            # Use boolean indexing to get active tokens
             max_activations = np.max(feature_activations, axis=(1, 2))
             self.act_dist = torch.from_numpy(max_activations).to(torch.float32)
             return self.act_dist
@@ -87,19 +82,14 @@ class Feature():
         # Get the set of unique tokens that this feature activates on
         # for over all the examples in the database
         if self.token_set is not None:
+            # Check if we already got the token set to avoid redundant loading
             return self.token_set
         else:
             self.db.assert_loaded()
             tokens, indices, _ = self.db._get_tiv_parts(self.hook_name) 
-            # Convert feature_id to numpy array for efficient comparison
-            feature_id_array = np.array([self.feature_id], dtype=indices.dtype)
-            # Use numpy's vectorized operations
-            feature_mask = np.isin(indices, feature_id_array)
-            # Use any() along axis 2 to find where the feature is active
+            feature_mask = indices == self.feature_id
             active_mask = feature_mask.any(axis=2)
-            # Use boolean indexing to get active tokens
             active_tokens = tokens[active_mask]            
-            # Get unique tokens
             self.token_set = np.unique(active_tokens)
             return self.token_set
 
@@ -140,19 +130,19 @@ class Feature():
 
     def get_logits(self, n_logits=8):
         # Returns the most promoted and most suppressed tokens by this feature
-        feature_dir = self.db.encoder.W_dec[self.feature_id]        
-        unembedding = self.db.model.lm_head.weight.to(torch.float32)
+        feature_dir = self.db.encoder.get_codebook(self.hook_name)[self.feature_id]        
+        unembedding = self.db.encoder.model.lm_head.weight.to(torch.float32)
         feature_logits = unembedding @ feature_dir
         # Get top logits and indices
         top_values, top_indices = torch.topk(feature_logits, n_logits)
         top_tokens = [
-            (self.db.tokenizer.decode([idx.item()]), value.item())
+            (self.db.encoder.tokenizer.decode([idx.item()]), value.item())
             for idx, value in zip(top_indices, top_values)
         ]
         # Get bottom logits and indices
         bottom_values, bottom_indices = torch.topk(feature_logits, n_logits, largest=False)
         bottom_tokens = [
-            (self.db.tokenizer.decode([idx.item()]), value.item())
+            (self.db.encoder.tokenizer.decode([idx.item()]), value.item())
             for idx, value in zip(bottom_indices, bottom_values)
         ]
         return top_tokens, bottom_tokens

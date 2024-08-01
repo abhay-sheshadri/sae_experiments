@@ -30,6 +30,9 @@ class SparseAutoencoder:
 
     def encode(self, acts):
         raise NotImplementedError()
+    
+    def get_codebook(self, hook_name):
+        raise NotImplementedError()
         
     @torch.inference_mode()
     def featurize(self, tokens, masks=None):
@@ -132,6 +135,9 @@ class SparseAutoencoderCollection(SparseAutoencoder):
                 raise ValueError(f"Inconsistent values for attribute '{attr}' across encoders: {values}")
             setattr(self, attr, values[0])
 
+    def get_codebook(self, hook_name):
+        return self.encoder[hook_name].get_codebook(hook_name)
+    
     @torch.inference_mode()
     def featurize(self, tokens, masks=None):
         """
@@ -220,6 +226,9 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         out = self.encoder.encode(acts)
         return out.top_indices, out.top_acts
     
+    def get_codebook(self, hook_name):
+        return self.encoder.W_dec
+    
     @staticmethod
     def load_llama3_sae(layer, instruct=True, v2=False, *args, **kwargs):
         # Loading LLaMa3 SAEs trained by Nora Belrose
@@ -265,6 +274,9 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         sae_latents = torch.relu(sae_latents) * (sae_latents > self.encoder.threshold)
         top_sae_latents = sae_latents.topk(self.max_k, dim=-1, sorted=False)
         return top_sae_latents.indices, top_sae_latents.values
+
+    def get_codebook(self, hook_name):
+        return self.encoder.W_dec
     
     @staticmethod
     def load_npz_weights(weight_path, dtype, device):

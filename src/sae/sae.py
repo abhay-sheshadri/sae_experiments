@@ -6,19 +6,19 @@ from typing import NamedTuple
 import einops
 import torch
 from huggingface_hub import snapshot_download
-from jaxtyping import Float, Int64
+from natsort import natsorted
 from safetensors.torch import load_model, save_model
-from torch import nn, Tensor
+from torch import Tensor, nn
 
 from .config import SaeConfig
-from .kernels import TritonDecoder
+from .utils import decoder_impl
 
 
 class EncoderOutput(NamedTuple):
-    top_acts: Float[Tensor, "... d_sae"]
+    top_acts: Tensor
     """Activations of the top-k latents."""
 
-    top_indices: Int64[Tensor, "..."]
+    top_indices: Tensor
     """Indices of the top-k features."""
 
 
@@ -51,42 +51,53 @@ class Sae(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.d_in = d_in
-        d_sae = d_in * cfg.expansion_factor
+        self.num_latents = cfg.num_latents or d_in * cfg.expansion_factor
 
-        self.encoder = nn.Linear(d_in, d_sae, device=device, dtype=dtype)
+        self.encoder = nn.Linear(d_in, self.num_latents, device=device, dtype=dtype)
         self.encoder.bias.data.zero_()
 
-        self.W_dec = (
-            nn.Parameter(self.encoder.weight.data.clone())
-            if decoder
-            else None
-        )
+        self.W_dec = nn.Parameter(self.encoder.weight.data.clone()) if decoder else None
         if decoder and self.cfg.normalize_decoder:
             self.set_decoder_norm_to_unit_norm()
 
         self.b_dec = nn.Parameter(torch.zeros(d_in, dtype=dtype, device=device))
 
     @staticmethod
-    def load_many_from_hub(
+    def load_many(
         name: str,
+        local: bool = False,
+        layers: list[str] | None = None,
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
-        pattern: str | None,
+        pattern: str | None = None,
     ) -> dict[str, "Sae"]:
         """Load SAEs for multiple hookpoints on a single model and dataset."""
         pattern = pattern + "/*" if pattern is not None else None
-        repo_path = Path(snapshot_download(name, allow_patterns=pattern))
-        return {
-            f.stem: Sae.load_from_disk(f, device=device, decoder=decoder)
+        if local:
+            repo_path = Path(name)
+        else:
+            repo_path = Path(snapshot_download(name, allow_patterns=pattern))
+
+        if layers is not None:
+            return {
+                layer: Sae.load_from_disk(repo_path / layer, device=device, decoder=decoder)
+                for layer in natsorted(layers)
+            }
+        files = [
+            f
             for f in repo_path.iterdir()
             if f.is_dir() and (pattern is None or fnmatch(f.name, pattern))
+        ]
+        return {
+            f.name: Sae.load_from_disk(f, device=device, decoder=decoder)
+            for f in natsorted(files, key=lambda f: f.name)
         }
 
     @staticmethod
     def load_from_hub(
         name: str,
-        layer: int | None = None,
+        hookpoint: str | None = None,
         device: str | torch.device = "cpu",
         *,
         decoder: bool = True,
@@ -94,15 +105,16 @@ class Sae(nn.Module):
         # Download from the HuggingFace Hub
         repo_path = Path(
             snapshot_download(
-                name, allow_patterns=f"layer_{layer}/*" if layer is not None else None,
+                name,
+                allow_patterns=f"{hookpoint}/*" if hookpoint is not None else None,
             )
         )
-        if layer is not None:
-            repo_path = repo_path / f"layer_{layer}"
+        if hookpoint is not None:
+            repo_path = repo_path / hookpoint
 
         # No layer specified, and there are multiple layers
         elif not repo_path.joinpath("cfg.json").exists():
-            raise FileNotFoundError(f"No config file found; try specifying a layer.")
+            raise FileNotFoundError("No config file found; try specifying a layer.")
 
         return Sae.load_from_disk(repo_path, device=device, decoder=decoder)
 
@@ -124,7 +136,7 @@ class Sae(nn.Module):
         load_model(
             model=sae,
             filename=str(path / "sae.safetensors"),
-            # device=str(device),
+            device=str(device),
             # TODO: Maybe be more fine-grained about this in the future?
             strict=decoder,
         )
@@ -136,10 +148,13 @@ class Sae(nn.Module):
 
         save_model(self, str(path / "sae.safetensors"))
         with open(path / "cfg.json", "w") as f:
-            json.dump({
-                **self.cfg.to_dict(),
-                "d_in": self.d_in,
-            }, f)
+            json.dump(
+                {
+                    **self.cfg.to_dict(),
+                    "d_in": self.d_in,
+                },
+                f,
+            )
 
     @property
     def device(self):
@@ -149,14 +164,14 @@ class Sae(nn.Module):
     def dtype(self):
         return self.encoder.weight.dtype
 
-    def pre_acts(self, x: Float[Tensor, "... d_in"]) -> Float[Tensor, "... d_sae"]:
+    def pre_acts(self, x: Tensor) -> Tensor:
         # Remove decoder bias as per Anthropic
         sae_in = x.to(self.dtype) - self.b_dec
         out = self.encoder(sae_in)
 
         return nn.functional.relu(out) if not self.cfg.signed else out
 
-    def select_topk(self, latents: Float[Tensor, "... d_sae"]) -> EncoderOutput:
+    def select_topk(self, latents: Tensor) -> EncoderOutput:
         """Select the top-k latents."""
         if self.cfg.signed:
             _, top_indices = latents.abs().topk(self.cfg.k, sorted=False)
@@ -165,19 +180,15 @@ class Sae(nn.Module):
             return EncoderOutput(top_acts, top_indices)
 
         return EncoderOutput(*latents.topk(self.cfg.k, sorted=False))
-    
-    def encode(self, x: Float[Tensor, "... d_in"]) -> EncoderOutput:
+
+    def encode(self, x: Tensor) -> EncoderOutput:
         """Encode the input and select the top-k latents."""
         return self.select_topk(self.pre_acts(x))
 
-    def decode(
-        self,
-        top_acts: Float[Tensor, "... d_sae"],
-        top_indices: Int64[Tensor, "..."],
-    ) -> Float[Tensor, "... d_in"]:
+    def decode(self, top_acts: Tensor, top_indices: Tensor) -> Tensor:
         assert self.W_dec is not None, "Decoder weight was not initialized."
 
-        y = TritonDecoder.apply(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
+        y = decoder_impl(top_indices, top_acts.to(self.dtype), self.W_dec.mT)
         return y + self.b_dec
 
     def forward(self, x: Tensor, dead_mask: Tensor | None = None) -> ForwardOutput:

@@ -13,7 +13,7 @@ import os
 import json
 import numpy as np
 import torch
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import transformer_lens.utils as tl_utils
 
 
@@ -122,7 +122,7 @@ class FeatureDatabase:
             latent_data=result
         )
     
-    def _get_tiv_parts(self, hook_name):
+    def _get_tiv_parts(self, hook_name, zero_bos_acts=False, load_to_memory=False):
         self.assert_loaded()
         # Separates data into tokens, indices, and values
         assert hook_name in self.hook_names
@@ -130,14 +130,24 @@ class FeatureDatabase:
         tokens = data[:, :, 0:8].view(np.int64).squeeze(-1)
         indices = data[:, :, 8:8+4*self.k].view(np.int32)
         values = data[:, :, 8+4*self.k:].view(np.float16)
+        # Load data to memory if requested
+        if load_to_memory:
+            tokens = np.array(tokens)
+            indices = np.array(indices)
+            values = np.array(values)
+        # Zero out the feature activations on the bos tokens
+        if zero_bos_acts:
+            bos_mask = tokens == self.encoder.tokenizer.bos_token_id
+            # Create a copy of values before modifying if it's not already in memory
+            if not load_to_memory:
+                values = np.array(values, copy=True)
+            values[bos_mask] = 0  # or -1 if you prefer
         return (tokens, indices, values)
-    
+
     def get_common_features(self, hook_name, k=10, chunk_size=1024):
         # Get ranked top most higly activating features in the database
         self.assert_loaded()
-        _, indices, values = self._get_tiv_parts(hook_name)
-        # Remove the bos token
-        indices, values = indices[:, 2:, :], values[:, 2:, :] # for whatever reason, sometimes the 2nd token is bos
+        tokens, indices, values = self._get_tiv_parts(hook_name, zero_bos_acts=True)
         n_batch, n_pos, n_k = indices.shape
         max_activations = np.zeros(self.n, dtype=values.dtype)
         for i in tqdm(range(0, n_batch, chunk_size)):

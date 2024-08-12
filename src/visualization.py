@@ -5,70 +5,55 @@ import matplotlib.pyplot as plt
 def interpolate_color(start_color, end_color, factor):
     """
     Interpolate between two colors.
-    
-    Parameters:
-    start_color (tuple): RGB values for the starting color (light orange)
-    end_color (tuple): RGB values for the ending color (dark orange)
-    factor (float): A value between 0 and 1 indicating the interpolation factor
-    
-    Returns:
-    tuple: Interpolated RGB color
     """
+    # For each pair of corresponding color values in start_color and end_color:
+    # 1. Calculate the difference: (end - start)
+    # 2. Multiply this difference by the factor
+    # 3. Add the result to the start value
+    # 4. Convert the result to an integer
+    # Return the resulting color as a tuple
     return tuple(int(start + factor * (end - start)) for start, end in zip(start_color, end_color))
+
+
+def light_mode(html):
+    # Define HTML wrapper for light mode display
+    light_mode_wrapper = """
+    <div style="background-color: white; color: black; padding: 20px;">
+        {}
+    </div>
+    """
+    # Generate the categorized examples HTML and wrap it in the light mode div
+    return light_mode_wrapper.format(html)
 
 
 def generate_highlighted_html(tokens, acts):
     """
     Generates HTML for a single example with highlighted text.
-
-    Parameters:
-    tokens (list): A list of string tokens representing the text.
-    acts (list): A list of float values representing the activation (highlight intensity) for each token.
-
-    Returns:
-    str: HTML string with highlighted text.
-
-    Raises:
-    ValueError: If the number of tokens doesn't match the number of activation values.
     """
+    # Make sure there are an equal number of tokens and activations
     if len(tokens) != len(acts):
         raise ValueError("The number of tokens and activations must match.")
-
+    # Generate html content
     html_content = "<div class='text-content'>"
     for token, act in zip(tokens, acts):
+        # Highlight token if act > 0
         if act > 0:
             # Normalize activation, max at 1
             factor = min(act / 10, 1)
-            
             # Interpolate color
             light_orange = (255, 237, 160)  # RGB for very light orange
             dark_orange = (240, 134, 0)    # RGB for dark, saturated orange
             color = interpolate_color(light_orange, dark_orange, factor)
-            
             html_content += f'<span class="highlight" style="background-color: rgb{color};">{html.escape(token)}</span>'
         else:
             html_content += html.escape(token)
     html_content += "</div>"
-
     return html_content
 
 
 def generate_categorized_examples(categorized_examples):
     """
     Generates complete HTML content for multiple categories of examples.
-
-    Parameters:
-    categorized_examples (dict): A dictionary where keys are category names (strings) and 
-                                 values are lists of tuples. Each tuple contains two lists: 
-                                 tokens and their corresponding activation values.
-
-    Returns:
-    str: Complete HTML string with all categories and their examples, including CSS styling.
-
-    This function creates a structured HTML document with:
-    - Overall styling for the document
-    - Sections for each category
-    - Individual examples within each category, using the generate_highlighted_html function
     """
     css = """
     <style>
@@ -126,3 +111,34 @@ def generate_categorized_examples(categorized_examples):
     html_content += "</div>"
     full_html = f"<!DOCTYPE html><html><head>{css}</head><body>{html_content}</body></html>"
     return full_html
+
+
+def feature_centric_view(feature, short=False):
+    if short:
+        # Just add the top 5 max activating examples
+        max_activation_examples = feature.get_max_activating(5)
+        # Create a dictionary with these top activations
+        display_dict = {"Top Activations": [ex.get_tokens_feature_lists(feature) for ex in max_activation_examples]}
+    else:
+        # Get the top 15 examples that maximally activate this feature
+        max_activation_examples = feature.get_max_activating(15)
+        # Create a dictionary with these top activations
+        display_dict = {"Top Activations": [ex.get_tokens_feature_lists(feature) for ex in max_activation_examples]}
+        # Get 8 quantiles with 5 examples each
+        quantiles = feature.get_quantiles(8, 5)
+        # Iterate through the quantiles in reverse order (highest to lowest)
+        for i, (lower, upper) in enumerate(list(quantiles)[::-1]):
+            # Get examples for this quantile
+            examples = quantiles[(lower, upper)]
+            # Add examples for this quantile to the display dictionary
+            # The key is formatted as "Interval {i} - (lower_bound, upper_bound)"
+            display_dict[f"Interval {i} - ({lower:.2f}, {upper:.2f})"] = [ex.get_tokens_feature_lists(feature) for ex in examples]    
+    return light_mode(generate_categorized_examples(display_dict))
+    # Define HTML wrapper for light mode display
+    light_mode_wrapper = """
+    <div style="background-color: white; color: black; padding: 20px;">
+        {}
+    </div>
+    """
+    # Generate the categorized examples HTML and wrap it in the light mode div
+    return light_mode_wrapper.format()

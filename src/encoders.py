@@ -99,6 +99,51 @@ class SparseAutoencoder:
         else:
             return self.batched_featurize(input_ids, attention_mask, batch_size)
 
+    @torch.inference_mode()
+    def get_model_residual_acts(self, text, batch_size=None, max_length=512):
+        """
+        Tokenize the input text and return all residual activations from the model.
+        """
+        # Ensure max_length doesn't exceed the model's maximum
+        max_length = min(self.tokenizer.model_max_length, max_length)
+        # Tokenize the input text
+        tokens = self.tokenizer(
+            text,
+            return_tensors="pt",
+            padding="longest",  # Pad to the longest sequence in the batch
+            max_length=max_length,
+            truncation=True,  # Truncate sequences longer than max_length
+            return_attention_mask=True  # Get attention mask to handle padding
+        )
+        input_ids = tokens["input_ids"]
+        attention_mask = tokens["attention_mask"]
+        # If batch_size is not specified, process all input at once
+        if batch_size is None:
+            batch_size = input_ids.size(0)
+        all_residual_acts = None
+        # Process input in batches
+        for i in tqdm(range(0, input_ids.size(0), batch_size)):
+            # Extract batch and move to device (GPU/CPU)
+            batch_input_ids = input_ids[i:i+batch_size].to(self.model.device)
+            batch_attention_mask = attention_mask[i:i+batch_size].to(self.model.device)
+            # Get residual activations for the batch
+            batch_residual_acts = get_all_residual_acts(self.model, batch_input_ids, batch_attention_mask, batch_size)
+            # Apply attention mask to the activations
+            # This ensures that padding tokens don't contribute to the activations
+            masked_batch_residual_acts = [
+                (act * batch_attention_mask.unsqueeze(-1)).cpu() for act in batch_residual_acts
+            ]
+            # Concatenate the results along the batch dimension
+            if all_residual_acts is None:
+                all_residual_acts = masked_batch_residual_acts
+            else:
+                all_residual_acts = [
+                    torch.cat([existing, new], dim=0)
+                    for existing, new in zip(all_residual_acts, masked_batch_residual_acts)
+                ]
+        # Return the residual activations
+        return all_residual_acts
+
     def __repr__(self):
         return f"{self.__class__.__name__}(hook_name={self.hook_name}, n_features={self.n_features}, max_k={self.max_k})"
 
@@ -315,14 +360,3 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
             hook_name=f"model.layers.{layer}", # The SAE reads in the output of this block
             *args, **kwargs
         )
-
-
-def expand_latents(latent_indices, latent_acts, n_features):
-    """
-    Convert N_ctx x K indices in (0, N_features) and N_ctx x K acts into N x N_features sparse tensor
-    """
-    n_batch, n_pos, _ = latent_indices.shape
-    expanded = torch.zeros((n_batch, n_pos, n_features), dtype=latent_acts.dtype)
-    expanded.scatter_(-1, latent_indices, latent_acts)
-    return expanded
-

@@ -184,9 +184,10 @@ class ClsProbe(Probe):
 
 class LinearClsProbe(ClsProbe):
 
-    def __init__(self, fit_intercept: bool = True,  *args, **kwargs):
+    def __init__(self, fit_intercept: bool = True, l1_penalty: float = 0,  *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fit_intercept = fit_intercept
+        self.l1_penalty = l1_penalty
         
     def construct_model(self, input_dim, output_dim):
         self.model = nn.Linear(input_dim, output_dim, bias=self.fit_intercept)

@@ -138,6 +138,105 @@ def forward_pass_with_hooks(model, input_ids, hook_points, attention_mask=None):
     return activations
 
 
+def forward_pass_with_interventions(model, input_ids, hook_interventions, attention_mask=None):
+    # Dictionary to store the original outputs of intervened modules
+    def create_intervention_hook(intervention_fn):
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                # Apply intervention to the first element (usually hidden states)
+                modified_first = intervention_fn(output[0])
+                # Return a new tuple with the modified first element and the rest unchanged
+                return (modified_first,) + output[1:]
+            else:
+                # If output is not a tuple, just modify and return it
+                assert isinstance(output, torch.Tensor)
+                return intervention_fn(output)
+        return hook_fn
+    # Add hooks for each intervention point
+    hooks = []
+    for hook_point, intervention_fn in hook_interventions.items():
+        submodule = extract_submodule(model, hook_point)
+        hook = submodule.register_forward_hook(create_intervention_hook(hook_point, intervention_fn))
+        hooks.append(hook)
+    try:
+        # Perform the forward pass
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    finally:
+        # Remove the hooks
+        for hook in hooks:
+            hook.remove()
+    return outputs
+
+
+def generate_with_interventions(model, input_ids, hook_interventions, max_new_tokens=20, attention_mask=None, **generation_kwargs):
+    # Define a function to create intervention hooks
+    def create_intervention_hook(intervention_fn):
+        def hook_fn(module, input, output):
+            if isinstance(output, tuple):
+                # Apply intervention to the first element (usually hidden states)
+                modified_first = intervention_fn(output[0])
+                # Return a new tuple with the modified first element and the rest unchanged
+                return (modified_first,) + output[1:]
+            else:
+                # If output is not a tuple, just modify and return it
+                assert isinstance(output, torch.Tensor)
+                return intervention_fn(output)
+        return hook_fn
+    # List to keep track of all hooks for later removal
+    hooks = []
+    # Register hooks for each intervention point
+    for hook_point, intervention_fn in hook_interventions.items():
+        # Extract the submodule at the specified hook point
+        submodule = extract_submodule(model, hook_point)
+        # Register the intervention hook
+        hook = submodule.register_forward_hook(create_intervention_hook(intervention_fn))
+        hooks.append(hook)
+    try:
+        # Perform the generation process with interventions in place
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                **generation_kwargs  # Allow for additional generation parameters
+            )
+    finally:
+        # Ensure all hooks are removed, even if an exception occurs
+        for hook in hooks:
+            hook.remove()
+    return outputs
+
+
+def get_all_residual_acts(model, input_ids, attention_mask=None, batch_size=32):
+    # Ensure the model is in evaluation mode
+    model.eval()
+    # Get the number of layers in the model
+    num_layers = model.config.num_hidden_layers
+    # Initialize a list to store all hidden states
+    all_hidden_states = []
+    # Process input in batches
+    for i in range(0, input_ids.size(0), batch_size):
+        batch_input_ids = input_ids[i:i+batch_size]
+        batch_attention_mask = attention_mask[i:i+batch_size] if attention_mask is not None else None
+        # Forward pass with output_hidden_states=True to get all hidden states
+        with torch.no_grad():
+            outputs = model(batch_input_ids, attention_mask=batch_attention_mask, output_hidden_states=True)
+        # The hidden states are typically returned as a tuple, with one tensor per layer
+        # We want to exclude the embedding layer (first element) and get only the residual activations
+        batch_hidden_states = outputs.hidden_states[1:]  # Exclude embedding layer
+        # Append to our list
+        all_hidden_states.append(batch_hidden_states)
+    # Concatenate all batches
+    # This will give us a list of tensors, where each tensor is the hidden states for a layer
+    # The shape of each tensor will be (total_examples, sequence_length, hidden_size)
+    concatenated_hidden_states = [
+        torch.cat([batch[layer] for batch in all_hidden_states], dim=0)
+        for layer in range(num_layers)
+    ]
+    return concatenated_hidden_states
+
+
 def get_bucket_folder(bucket_path, local_path):
     # First check if the folder in GCloud has already been download.
     # If it has, just return that path.  If not, download it and then return the path

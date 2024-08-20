@@ -5,9 +5,8 @@ import time
 
 import numpy as np
 import torch
-from tqdm.auto import tqdm
-
 from circuitsvis.tokens import colored_tokens
+from tqdm.auto import tqdm
 from transformer_lens import utils as tl_utils
 
 from .utils import *
@@ -49,6 +48,20 @@ class Example():
     def get_tokens_feature_lists(self, feature):
         # Return tokens and feature activations
         return self.str_tokens, self.get_feature_activation(feature).tolist()
+    
+    def get_tokens_direction_scores(self, encoder, direction, hook_name):
+        # Get the direction scores for this example
+        # Normalize the direction
+        direction = normalize_last_dim(direction)
+        # Get the activations for this example
+        activations = forward_pass_with_hooks(
+            model=encoder.model,
+            input_ids=torch.tensor(self.tokens, dtype=torch.long, device=encoder.model.device).unsqueeze(0),
+            hook_points=[hook_name,]
+        )[hook_name][0]
+        # Get dot product between activations (n x d) and direction (d)
+        scores = activations @ direction
+        return self.str_tokens, scores.tolist()
 
 
 class Feature():

@@ -3,18 +3,12 @@ import os
 
 import numpy as np
 import torch
+import transformer_lens.utils as tl_utils
 from tqdm.auto import tqdm
 from transformer_lens import utils as tl_utils
 
 from .helper_classes import *
 from .utils import *
-
-import os
-import json
-import numpy as np
-import torch
-from tqdm.auto import tqdm
-import transformer_lens.utils as tl_utils
 
 
 class FeatureDatabase:

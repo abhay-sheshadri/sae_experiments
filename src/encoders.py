@@ -144,6 +144,48 @@ class SparseAutoencoder:
         # Return the residual activations
         return all_residual_acts
 
+    def get_examples_from_generations(self, generations):
+        # Tokenize the generations
+        tokenizer_output = self.tokenizer(
+            generations,
+            return_tensors="pt",
+            padding="longest",  # Pad to the longest sequence in the batch
+            max_length=1024,
+            truncation=True,
+            return_attention_mask=True
+        )
+        tokens = tokenizer_output["input_ids"]
+        attention_mask = tokenizer_output["attention_mask"]
+        # Get the SAE activations for the generations
+        result = self.featurize_text(generations)
+        # Create example classes
+        examples = []
+        for i in range(len(tokens)):
+            # Get the non-padding token positions
+            non_padding_positions = attention_mask[i].bool()
+            # Filter out padding tokens
+            non_padded_tokens = tokens[i][non_padding_positions]
+            # Filter out padding activations for each hook
+            non_padded_latent_data = {
+                hook: (
+                    result[hook][0][i][non_padding_positions],
+                    result[hook][1][i][non_padding_positions]
+                ) for hook in result
+            }
+            examples.append(Example(
+                tokens=non_padded_tokens,
+                tokenizer=self.tokenizer,
+                latent_data=non_padded_latent_data,
+            ))
+        return examples
+
+    def _fix_input_shape(self, acts):
+        if len(acts.shape) == 0:
+            raise Exception("0-dimensional input")
+        elif len(acts.shape) == 1:
+            acts = acts[None, :]
+        return acts
+
     def __repr__(self):
         return f"{self.__class__.__name__}(hook_name={self.hook_name}, n_features={self.n_features}, max_k={self.max_k})"
 
@@ -231,6 +273,12 @@ class SparseAutoencoderCollection(SparseAutoencoder):
             )
         return all_results
 
+    def reconstruct(self, acts):
+        raise Exception("Collection does not support reconstruct, use featurize instead")
+
+    def encode(self, acts):
+        raise Exception("Collection does not support encode, use featurize instead")
+
     def __repr__(self):
         return f"{self.__class__.__name__}(encoders={self.encoders})"
 
@@ -265,9 +313,11 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         self.encoder = encoder
     
     def reconstruct(self, acts):
+        acts = self._fix_input_shape(acts)
         return self.encoder(acts).sae_out
 
     def encode(self, acts):
+        acts = self._fix_input_shape(acts)
         out = self.encoder.encode(acts)
         return out.top_indices, out.top_acts
     
@@ -309,12 +359,14 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
     
     def reconstruct(self, acts):
         # Encode the acts in SAE space
+        acts = self._fix_input_shape(acts)
         sae_latents = acts @ self.encoder.W_enc + self.encoder.b_enc
         sae_latents = torch.relu(sae_latents) * (sae_latents > self.encoder.threshold)
         return sae_latents @ self.encoder.W_dec + self.encoder.b_dec
 
     def encode(self, acts):
         # Encode the acts in SAE space
+        acts = self._fix_input_shape(acts)
         sae_latents = acts @ self.encoder.W_enc + self.encoder.b_enc
         sae_latents = torch.relu(sae_latents) * (sae_latents > self.encoder.threshold)
         top_sae_latents = sae_latents.topk(self.max_k, dim=-1, sorted=False)

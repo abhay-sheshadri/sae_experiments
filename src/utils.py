@@ -129,7 +129,7 @@ def forward_pass_with_hooks(model, input_ids, hook_points, attention_mask=None):
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.no_grad():
+        with torch.autocast(device_type="cuda"):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -156,11 +156,11 @@ def forward_pass_with_interventions(model, input_ids, hook_interventions, attent
     hooks = []
     for hook_point, intervention_fn in hook_interventions.items():
         submodule = extract_submodule(model, hook_point)
-        hook = submodule.register_forward_hook(create_intervention_hook(hook_point, intervention_fn))
+        hook = submodule.register_forward_hook(create_intervention_hook(intervention_fn))
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.no_grad():
+        with torch.autocast(device_type="cuda"):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -194,7 +194,7 @@ def generate_with_interventions(model, input_ids, hook_interventions, max_new_to
         hooks.append(hook)
     try:
         # Perform the generation process with interventions in place
-        with torch.no_grad():
+        with torch.autocast(device_type="cuda"), torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -220,8 +220,7 @@ def get_all_residual_acts(model, input_ids, attention_mask=None, batch_size=32):
         batch_input_ids = input_ids[i:i+batch_size]
         batch_attention_mask = attention_mask[i:i+batch_size] if attention_mask is not None else None
         # Forward pass with output_hidden_states=True to get all hidden states
-        with torch.no_grad():
-            outputs = model(batch_input_ids, attention_mask=batch_attention_mask, output_hidden_states=True)
+        outputs = model(batch_input_ids, attention_mask=batch_attention_mask, output_hidden_states=True)
         # The hidden states are typically returned as a tuple, with one tensor per layer
         # We want to exclude the embedding layer (first element) and get only the residual activations
         batch_hidden_states = outputs.hidden_states[1:]  # Exclude embedding layer
@@ -269,5 +268,56 @@ def download_from_bucket(bucket_path, local_path):
     except subprocess.CalledProcessError as e:
         print(f"An error occurred while downloading: {e}")
         print(e.stderr)
-        
-        
+
+
+def expand_latents(latent_indices, latent_acts, n_features):
+    """
+    Convert N_ctx x K indices in (0, N_features) and N_ctx x K acts into N x N_features sparse tensor
+    """
+    n_batch, n_pos, _ = latent_indices.shape
+    expanded = torch.zeros((n_batch, n_pos, n_features), dtype=latent_acts.dtype)
+    expanded.scatter_(-1, latent_indices, latent_acts)
+    return expanded
+
+
+def squeeze_positions(activations, aggregation="flatten"):
+    # Validate the aggregation method
+    if aggregation == "max":
+        # Take the maximum value across the position dimension (dim=1)
+        return activations.amax(dim=1)
+    elif aggregation == "mean":
+        # Take the mean value across the position dimension (dim=1)
+        return activations.mean(dim=1)
+    elif aggregation == "flatten":
+        # Merge the batch and position dimensions
+        # This increases the first dimension size by a factor of sequence_length
+        return activations.flatten(0, 1)
+    elif aggregation == "last":
+        # Select the last token's activation for each sequence in the batch
+        return activations[:, -1, :]
+    elif aggregation.startswith("index"):
+        # index_k returns the kth token in each example.  Last is index_-1
+        index = int(aggregation.split("_")[-1])
+        return activations[:, index, :]
+    else:
+        raise NotImplementedError("Invalid method")
+    
+    
+def get_labeled(acts1, acts2, aggregation="max"):
+    # Use squeeze_positions to aggregate across the position dimension
+    acts1 = squeeze_positions(acts1, aggregation)
+    acts2 = squeeze_positions(acts2, aggregation)    
+    # Combine the features from both splits
+    input_acts = torch.cat([acts1, acts2], dim=0) 
+    # Create labels: 0 for split1, 1 for split2
+    labels = torch.cat([torch.zeros(acts1.shape[0], dtype=torch.long), torch.ones(acts2.shape[0], dtype=torch.long)])  
+    return input_acts, labels
+
+
+def normalize_last_dim(tensor):
+    # Compute the L2 norm along the last dimension
+    norm = torch.norm(tensor, p=2, dim=-1, keepdim=True)
+    # Divide the tensor by the norm
+    # We add a small epsilon to avoid division by zero
+    normalized_tensor = tensor / (norm + 1e-8)
+    return normalized_tensor

@@ -2,3 +2,5 @@ act_caches*.pkl
 jupyter_logs/
 notebook_slurm.sh
 LAT.csv
+.env
+google_credentials.json

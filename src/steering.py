@@ -10,25 +10,26 @@ from .utils import *
 
 
 def get_encoder_reconstruction_vector(encoder, vector, multiple=8):
-    # Scale and unsqueeze the input vector
-    scaled_vector = vector.unsqueeze(0) * multiple
-    # Reconstruct the vector
-    reconstructed_vector = encoder.reconstruct(scaled_vector)[0]
-    # Normalize the reconstructed vector
-    reconstructed_vector = normalize_last_dim(reconstructed_vector)
-    # Encode the scaled vector
-    top_features, top_values = encoder.encode(scaled_vector)
-    # Ensure we're working with 1D tensors
-    top_features = top_features.squeeze()
-    top_values = top_values.squeeze()
-    # Sort the values in descending order and get the corresponding indices
-    sorted_values, indices = torch.sort(top_values, descending=True)
-    # Use the indices to sort the features
-    sorted_features = top_features[indices]
-    return sorted_features, sorted_values, reconstructed_vector
+    with torch.autocast(device_type='cuda'):
+        # Scale and unsqueeze the input vector
+        scaled_vector = vector.unsqueeze(0) * multiple
+        # Reconstruct the vector
+        reconstructed_vector = encoder.reconstruct(scaled_vector)[0]
+        # Normalize the reconstructed vector
+        reconstructed_vector = normalize_last_dim(reconstructed_vector)
+        # Encode the scaled vector
+        top_features, top_values = encoder.encode(scaled_vector)
+        # Ensure we're working with 1D tensors
+        top_features = top_features.squeeze()
+        top_values = top_values.squeeze()
+        # Sort the values in descending order and get the corresponding indices
+        sorted_values, indices = torch.sort(top_values, descending=True)
+        # Use the indices to sort the features
+        sorted_features = top_features[indices]
+        return sorted_features, sorted_values, reconstructed_vector
 
 
-def get_steering_vector(features, labels, method="mean_diff"):
+def get_steering_vector(features, labels, method="mean_diff", normalized=True):
     assert method in ["logistic", "mean_diff", "rep_e", "random"], "Invalid method"
     # Convert features to Float32 if they're not already
     if features.dtype != torch.float32:
@@ -75,7 +76,10 @@ def get_steering_vector(features, labels, method="mean_diff"):
         # Useful for random steering vector baseline
         steering_vector = torch.randn(features.shape[1], dtype=features.dtype)
     # Return unit steering vector
-    return normalize_last_dim(steering_vector)
+    if normalized:
+        return normalize_last_dim(steering_vector)
+    else:
+        return steering_vector
 
 
 def compute_steering_vector(
@@ -99,7 +103,7 @@ def compute_steering_vector(
         positive_acts[layer], 
         aggregation=position_aggregation
     )
-    vector = get_steering_vector(train_input_acts, train_labels, method=method).cuda()
+    vector = get_steering_vector(train_input_acts, train_labels, method=method, normalized=multiple is not None).cuda()
     # Reconstruct with SAE if reconstruct_attack is true
     if reconstruct_attack:
         sorted_features, sorted_values, vector = get_encoder_reconstruction_vector(encoder, vector, multiple=multiple)

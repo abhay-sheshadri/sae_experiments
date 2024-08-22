@@ -129,7 +129,7 @@ def forward_pass_with_hooks(model, input_ids, hook_points, attention_mask=None):
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.autocast(device_type="cuda"):
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -160,7 +160,7 @@ def forward_pass_with_interventions(model, input_ids, hook_interventions, attent
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.autocast(device_type="cuda"):
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -194,7 +194,7 @@ def generate_with_interventions(model, input_ids, hook_interventions, max_new_to
         hooks.append(hook)
     try:
         # Perform the generation process with interventions in place
-        with torch.autocast(device_type="cuda"), torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype), torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

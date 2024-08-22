@@ -4,3 +4,4 @@ from .feature_selection import *
 from .steering import *
 from .helper_classes import *
 from .utils import *
+from .visualization import *

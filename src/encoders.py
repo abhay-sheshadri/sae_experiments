@@ -1,6 +1,8 @@
 import json
 import os
+import warnings
 
+from huggingface_hub import hf_hub_download
 import numpy as np
 import torch
 from torch import nn
@@ -178,6 +180,45 @@ class SparseAutoencoder:
                 latent_data=non_padded_latent_data,
             ))
         return examples
+
+    def format_inputs(self, prompt, system_prompt=None):
+        #Format input for language models using the tokenizer's chat template.
+        def format_single_input(single_prompt):
+            # Format a single prompt with optional system message using the tokenizer's chat template.
+            # Prepare messages in the format expected by chat models
+            messages = []
+            # Add system prompt if provided
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            # Add user prompt
+            messages.append({"role": "user", "content": single_prompt})
+            try:
+                # Use the tokenizer's chat template
+                return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except AttributeError:
+                warnings.warn(
+                    "The provided tokenizer does not have the 'apply_chat_template' method. "
+                    "Falling back to a simple format. This may not be optimal for all models.",
+                    UserWarning
+                )
+                # Simple fallback format
+                formatted = ""
+                if system_prompt:
+                    formatted += f"{system_prompt}\n"
+                formatted += f"{single_prompt}"
+                # Add BOS token if available
+                bos_token = getattr(self.tokenizer, 'bos_token', '')
+                return f"{bos_token}{formatted}"
+        # Handle input based on whether it's a single string or a list of strings
+        if isinstance(prompt, str):
+            return format_single_input(prompt)
+        elif isinstance(prompt, list):
+            return [format_single_input(p) for p in prompt]
+        else:
+            raise ValueError("prompt must be either a string or a list of strings")
+    
+    def sample_generations(self):
+        pass
 
     def _fix_input_shape(self, acts):
         if len(acts.shape) == 0:
@@ -398,10 +439,9 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         model_name = "google/gemma-2-9b-it" if instruct else "google/gemma-2-9b"
         model, tokenizer = load_hf_model_and_tokenizer(model_name)
         # Download/Load the sae 
-        bucket_path = f'gs://gemma-2-saes/release-preview/gemmascope-9b-pt-res/layer_{layer}/width_{width//10**3}k/average_l0_{l0}'
-        local_path = os.path.join('gemma-2-saes', 'release-preview', 'gemmascope-9b-pt-res', f'layer_{layer}', f'width_{width//10**3}k')
-        sae_path = get_bucket_folder(bucket_path, local_path)
-        sae_path = os.path.join(sae_path, f'average_l0_{l0}', 'params.npz')
+        repo_id = "google/gemma-scope-9b-pt-res"
+        filename = f"layer_{layer}/width_{width//10**3}k/average_l0_{l0}/params.npz"
+        sae_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
         # Load sae weights into module
         sae = GenericSaeModule(d_model=model.config.hidden_size, d_sae=width).cuda().to(torch.bfloat16)
         sae.load_state_dict(DeepmindSparseAutoencoder.load_npz_weights(sae_path, torch.bfloat16, "cuda"))

@@ -3,20 +3,20 @@ import itertools
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader
+from sklearn.decomposition import TruncatedSVD, PCA
 from sklearn.linear_model import LogisticRegression
+from sklearn.utils import resample
 import torch.nn.functional as F
 
 from .utils import *
 
 
-def get_encoder_reconstruction_vector(encoder, vector, multiple=8):
+def get_encoder_reconstruction_vector(encoder, vector):
     with torch.autocast(device_type='cuda'):
         # Scale and unsqueeze the input vector
-        scaled_vector = vector.unsqueeze(0) * multiple
+        scaled_vector = vector.unsqueeze(0)
         # Reconstruct the vector
         reconstructed_vector = encoder.reconstruct(scaled_vector)[0]
-        # Normalize the reconstructed vector
-        reconstructed_vector = normalize_last_dim(reconstructed_vector)
         # Encode the scaled vector
         top_features, top_values = encoder.encode(scaled_vector)
         # Ensure we're working with 1D tensors
@@ -51,11 +51,24 @@ def get_steering_vector(features, labels, method="mean_diff", normalized=True):
         # Convert to numpy for sklearn
         features_np = features.cpu().numpy()
         labels_np = labels.cpu().numpy()
+        # Balance the dataset
+        majority_class = 0 if (labels_np == 0).sum() > (labels_np == 1).sum() else 1
+        minority_class = 1 - majority_class
+        features_majority = features_np[labels_np == majority_class]
+        features_minority = features_np[labels_np == minority_class]
+        labels_majority = labels_np[labels_np == majority_class]
+        labels_minority = labels_np[labels_np == minority_class]
+        features_minority_upsampled, labels_minority_upsampled = resample(
+            features_minority, labels_minority,
+            replace=True, n_samples=len(features_majority), random_state=42
+        )
+        features_balanced = np.vstack((features_majority, features_minority_upsampled))
+        labels_balanced = np.hstack((labels_majority, labels_minority_upsampled))
         # Use sklearn's LogisticRegression
         lr = LogisticRegression(fit_intercept=False, max_iter=1000)
-        lr.fit(features_np, labels_np)        
+        lr.fit(features_balanced, labels_balanced)        
         # Convert the coefficients back to a PyTorch tensor
-        steering_vector = torch.from_numpy(lr.coef_[0]).to(features.device)
+        steering_vector = torch.from_numpy(lr.coef_[0]).to(features.device).to(features.dtype)
         # Make sure it points in the same direction as the mean_diff
         steering_vector = steering_vector * torch.sign(torch.dot(steering_vector, mean_diff))
     elif method == "rep_e":
@@ -66,10 +79,13 @@ def get_steering_vector(features, labels, method="mean_diff", normalized=True):
         pairs = list(itertools.product(pos_examples, neg_examples))
         # Compute differences for all pairs
         differences = torch.stack([pos - neg for pos, neg in pairs])
-        # Perform PCA using SVD
-        U, S, Vt = torch.linalg.svd(differences, full_matrices=False)
-        # Return the first principal component (first column of Vt.T)
-        steering_vector = Vt.T[:, 0]
+        # Sample a random subset of differences
+        n_samples = min(30_000, differences.size(0))
+        differences = differences[torch.randperm(differences.size(0))][:n_samples]
+        # Perform PCA using SVD and extract the first principal component
+        svd = TruncatedSVD(n_components=1, random_state=42)
+        svd.fit(differences.cpu().numpy())
+        steering_vector = torch.from_numpy(svd.components_[0]).to(features.device).to(features.dtype)
         # Make sure it points in the same direction as the mean_diff
         steering_vector = steering_vector * torch.sign(torch.dot(steering_vector, mean_diff))
     elif method == "random":
@@ -91,7 +107,6 @@ def compute_steering_vector(
     method="mean_diff",
     reconstruct_attack=False,
     batch_size=32,
-    multiple=8
 ):
     # Unlike get_steering_vector, this returns a wrapper that you can use for easy inference
     # Get the activations for the positive and negative examples
@@ -103,11 +118,10 @@ def compute_steering_vector(
         positive_acts[layer], 
         aggregation=position_aggregation
     )
-    vector = get_steering_vector(train_input_acts, train_labels, method=method, normalized=multiple is not None).cuda()
+    vector = get_steering_vector(train_input_acts, train_labels, method=method).cuda()
     # Reconstruct with SAE if reconstruct_attack is true
     if reconstruct_attack:
-        sorted_features, sorted_values, vector = get_encoder_reconstruction_vector(encoder, vector, multiple=multiple)
-    vector = vector * multiple
+        sorted_features, sorted_values, vector = get_encoder_reconstruction_vector(encoder, vector)
     # Create a wrapper function to easily get the output of the model
     def wrapper_fn(prompt, **generation_kwargs):
         # Tokenize the input
@@ -147,6 +161,10 @@ def run_soft_prompt_opt(
     sae_l1_penalty=0.0001,
     attack_init=None
 ):
+    # Make sure magnitude has a value
+    if magnitude is None:
+        assert attack_init is not None, "If magnitude is None, attack_init must be passed"
+        magnitude = attack_init.norm(dim=-1).mean().item()
     # Create dataset and dataloader
     dataset = TensorDataset(input_ids, attention_mask, soft_prompt_mask, target_mask)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -170,8 +188,8 @@ def run_soft_prompt_opt(
             attack = torch.randn(soft_prompt_length, encoder.model.config.hidden_size)
         else:
             raise Exception("Invalid n_dim")
+        attack = normalize_last_dim(attack) * magnitude
     attack = torch.nn.Parameter(attack.float().to(encoder.model.device))
-    attack.data = normalize_last_dim(attack.data)
     attack.requires_grad = True
     # Create function to create hooks
     temp_hook_output = None
@@ -180,22 +198,22 @@ def run_soft_prompt_opt(
             nonlocal temp_hook_output # Make sure the variable is in scope
             # Assuming output shape is (batch_size, sequence_length, hidden_size)
             if reconstruct_attack:
-                features, values, modified_attack = get_encoder_reconstruction_vector(encoder, attack, multiple=magnitude)
+                features, values, modified_attack = get_encoder_reconstruction_vector(encoder, attack)
                 temp_hook_output = values
             else:
                 modified_attack = attack
-            modified_attack = modified_attack * magnitude
             # Depending on the shape, we need to modify the output separately
             if len(modified_attack.shape) == 1:
-                output[batch_soft_prompt_mask] = output[batch_soft_prompt_mask, :] + modified_attack
+                output[batch_soft_prompt_mask] = output[batch_soft_prompt_mask, :] + modified_attack.to(output.dtype)
             elif len(modified_attack.shape) == 2:
                 broadcasted_attack = modified_attack.unsqueeze(0).expand(output.size(0), -1, -1)
-                output[batch_soft_prompt_mask] = output[batch_soft_prompt_mask, :] + broadcasted_attack.flatten(0, 1)
+                output[batch_soft_prompt_mask] = output[batch_soft_prompt_mask, :] + broadcasted_attack.flatten(0, 1).to(output.dtype)
             return output
         return hook
     # Train attack
     optimizer = torch.optim.AdamW([attack,], lr=lr)
-    for epoch in tqdm(range(n_epochs)):
+    progress_bar = tqdm(range(n_epochs))
+    for epoch in progress_bar:
         total_loss = 0
         for batch_input_ids, batch_attention_mask, batch_soft_prompt_mask, batch_target_mask in dataloader:
             # Move data onto model device
@@ -224,13 +242,14 @@ def run_soft_prompt_opt(
             optimizer.step()
             total_loss += loss.item()
             # Clip the attacks
-            attack.data = normalize_last_dim(attack.data)
-       # Log loss    
-        print(f"Epoch {epoch+1}/{n_epochs}, Loss: {total_loss/len(dataloader)}")
+            attack.data = normalize_last_dim(attack.data) * magnitude
+        # Log loss    
+        avg_loss = total_loss / len(dataloader)
+        progress_bar.set_postfix(loss=f"{avg_loss:.4f}")
     # Reconstruct the activations one final time
     if reconstruct_attack:
-        features, values, attack = get_encoder_reconstruction_vector(encoder, attack, multiple=magnitude)
-    return attack.data * magnitude
+        features, values, attack = get_encoder_reconstruction_vector(encoder, attack)
+    return attack.data
 
 
 def train_universal_soft_prompt(
@@ -337,7 +356,7 @@ def train_universal_soft_prompt(
             if output.shape[1] == 1:
                 return output
             else:
-                output[sp_mask] = output[sp_mask] + attack
+                output[sp_mask] = output[sp_mask] + attack.to(output.dtype)
                 return output
         return generate_with_interventions(
             model=encoder.model,
@@ -432,7 +451,7 @@ def train_universal_steering_vector(
         # Define the hook function
         def universal_steering_hook(output):
             # Apply steering to the last token of the prompt and all subsequent tokens
-            output[:, -1:] = output[:, -1:] + attack
+            output[:, -1:] = output[:, -1:] + attack.to(output.dtype)
             return output
         return generate_with_interventions(
             model=encoder.model,

@@ -92,7 +92,8 @@ class SparseAutoencoder:
             padding="longest",  # Pad to the longest sequence in the batch
             max_length=max_length,
             truncation=True,
-            return_attention_mask=True
+            return_attention_mask=True,
+            add_special_tokens=False
         )
         input_ids = tokens["input_ids"]
         attention_mask = tokens["attention_mask"]
@@ -154,7 +155,8 @@ class SparseAutoencoder:
             padding="longest",  # Pad to the longest sequence in the batch
             max_length=1024,
             truncation=True,
-            return_attention_mask=True
+            return_attention_mask=True,
+            add_special_tokens=False
         )
         tokens = tokenizer_output["input_ids"]
         attention_mask = tokenizer_output["attention_mask"]
@@ -217,9 +219,32 @@ class SparseAutoencoder:
         else:
             raise ValueError("prompt must be either a string or a list of strings")
     
-    def sample_generations(self):
-        pass
+    def sample_generations(self, prompts, format_inputs=True, batch_size=4, system_prompt=None, **generation_kwargs):
+        # Format inputs if requested
+        if format_inputs:
+            prompts = self.format_inputs(prompts, system_prompt)
+        all_generations = []
+        # Process prompts in batches
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i:i+batch_size]
+            # Tokenize inputs
+            inputs = self.tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, add_special_tokens=False)
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            # Generate text
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    num_return_sequences=1,
+                    **generation_kwargs
+                )
+            # Decode generated text
+            batch_generations = self.tokenizer.batch_decode(outputs)
+            batch_generations = [gen.replace(self.tokenizer.pad_token, "") for gen in batch_generations]
+            all_generations.extend(batch_generations)
+        return self.get_examples_from_generations(all_generations)
 
+        
     def _fix_input_shape(self, acts):
         if len(acts.shape) == 0:
             raise Exception("0-dimensional input")
@@ -373,6 +398,24 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         model, tokenizer = load_hf_model_and_tokenizer(model_name)
         # Load SAE using Eleuther library
         sae_name = "EleutherAI/sae-llama-3-8b-32x-v2" if v2 else "EleutherAI/sae-llama-3-8b-32x"
+        sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+        return EleutherSparseAutoencoder(
+            model=model,
+            tokenizer=tokenizer,
+            encoder=sae,
+            hook_name=f"model.layers.{layer}", # The SAE reads in the output of this block
+            *args, **kwargs
+        )
+    
+    @staticmethod
+    def load_pythia_sae(layer, model_size="160m", deduped=True, *args, **kwargs):
+        # Loading Pythia SAEs trained by EleutherAI
+        assert model_size in ["70m", "160m"], "Residual stream SAEs are only available for 70m and 160m models"
+        # Load the model from huggingface
+        model_name = f"EleutherAI/pythia-{model_size}-deduped" if deduped else f"EleutherAI/pythia-{model_size}"
+        model, tokenizer = load_hf_model_and_tokenizer(model_name)
+        # Load SAE using Eleuther library
+        sae_name = f"EleutherAI/sae-pythia-{model_size}-deduped-32k" if deduped else f"EleutherAI/sae-pythia-{model_size}-32k"
         sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
         return EleutherSparseAutoencoder(
             model=model,

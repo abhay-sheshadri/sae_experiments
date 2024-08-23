@@ -61,7 +61,7 @@ class Example():
             hook_points=[hook_name,]
         )[hook_name][0]
         # Get dot product between activations (n x d) and direction (d)
-        scores = activations @ direction
+        scores = activations.float() @ direction.float()
         return self.str_tokens, scores.tolist()
 
 

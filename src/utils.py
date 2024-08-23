@@ -63,7 +63,7 @@ def load_hf_model(
             trust_remote_code=True,
         ).eval()
     # Disable model grad if we're not training
-    if not requires_grad:
+    if not requires_grad:   
         model.requires_grad_(False)
     # Save and return the model
     loaded_models[model_name] = model
@@ -92,6 +92,7 @@ def load_hf_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     tokenizer.padding_side = "left"
     tokenizer.pad_token_id = tokenizer.eos_token_id
+    model.generation_config.eos_token_id = tokenizer.eos_token_id # Make sure the eos in the generation config is the same as the tokenizer
     return model, tokenizer
 
 

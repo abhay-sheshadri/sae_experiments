@@ -29,14 +29,38 @@ def _light_mode(html):
 
 def _generate_highlighted_html(tokens, acts, use_orange_highlight=True):
     """
-    Generates HTML for a single example with highlighted text.
+    Generates HTML for a single example with highlighted text and activation tooltips.
     """
     # Make sure there are an equal number of tokens and activations
     if len(tokens) != len(acts):
         raise ValueError("The number of tokens and activations must match.")
     # Generate html content
-    html_content = "<div class='text-content'>"
+    html_content = "<style>\n"
+    html_content += """
+    .text-content span {
+      position: relative;
+      cursor: help;
+    }
+    .text-content span:hover::after {
+      content: attr(title);
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #333;
+      color: white;
+      padding: 5px;
+      border-radius: 3px;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+    """
+    html_content += "</style>\n"
+    html_content += "<div class='text-content'>"
+    # Iterate through each token and activation
     for token, act in zip(tokens, acts):
+        # Format the activation value for display
+        act_display = f"{act:.2f}"  # Display activation with 2 decimal places
         # Highlight token if act != 0
         if act != 0:
             # Normalize activation, max at 1
@@ -51,9 +75,9 @@ def _generate_highlighted_html(tokens, acts, use_orange_highlight=True):
                     color = _interpolate_color((255, 255, 255), (0, 0, 255), factor)  # White to Blue
                 else:
                     color = _interpolate_color((255, 255, 255), (255, 0, 0), factor)  # White to Red
-            html_content += f'<span class="highlight" style="background-color: rgb{color};">{html.escape(token)}</span>'
+            html_content += f'<span class="highlight" style="background-color: rgb{color};" title="{token}: {act_display}">{html.escape(token)}</span>'
         else:
-            html_content += html.escape(token)
+            html_content += f'<span title="{token}: {act_display}">{html.escape(token)}</span>'
     html_content += "</div>"
     return html_content
 
@@ -274,7 +298,6 @@ def _combine_html_contents(*html_contents, title="Combined View"):
         active_class = "active" if i == 0 else ""
         combined_html += f"""
         <div id="content_{i}" class="content {active_class}">
-            <h2>{section_title}</h2>
             {content}
         </div>
         """
@@ -322,34 +345,54 @@ def feature_centric_view(feature, short=False):
     return _light_mode(combined_html)
 
 
-def prompt_centric_view(examples, feature):
-    # Generate a view for a single example or a list of examples and a feature.
-    if not isinstance(examples, list):
-        examples = [examples]
-    html_content = f"<h2>Prompt-Centric View - Feature {feature.feature_id}, Hook Point {feature.hook_name}</h2>"
+import html
+
+def _generate_prompt_centric_html(examples, title, get_tokens_and_acts_func, use_orange_highlight):
+    # Generate HTML content for the prompt-centric view
+    # Add a title if provided
+    if title is not None:
+        html_content = f"<h2>{title}</h2>"
+    else:
+        html_content = ""
+    # Add a container for the examples
     html_content += "<div class='examples-container'>"
-    # Iterate through each example, and create div
+    # Iterate through each example
     for i, example in enumerate(examples, 1):
-        acts = example.get_feature_activation(feature)
+        # Get the tokens and activations for the example
+        str_tokens, acts = get_tokens_and_acts_func(example)
         html_content += f'<div class="example"><div class="example-label">Example {i}:</div>'
-        html_content += _generate_highlighted_html(example.str_tokens, acts.tolist())
+        # Generate highlighted HTML for the example
+        html_content += _generate_highlighted_html(str_tokens, acts, use_orange_highlight)
         html_content += '</div>'
     html_content += "</div>"
-    return _light_mode(html_content)
+    return html_content
 
+def _generate_prompt_centric_view(examples, title, get_tokens_and_acts_func, use_orange_highlight):
+    # Check if examples is a single example or a list of examples
+    if not isinstance(examples, list) and not isinstance(examples, dict):
+        examples = [examples]
+    # Generate the prompt-centric view HTML content
+    if isinstance(examples, dict):
+        html_contents = []
+        for category, category_examples in examples.items():
+            category_html = _generate_prompt_centric_html(category_examples, None, get_tokens_and_acts_func, use_orange_highlight)
+            html_contents.append((category, category_html))
+        return _light_mode(_combine_html_contents(*html_contents, title=title))
+    else:
+        return _light_mode(_generate_prompt_centric_html(examples, title, get_tokens_and_acts_func, use_orange_highlight))
+
+def prompt_centric_view_feature(examples, feature):
+    # Generate the title for the prompt-centric view
+    title = f"Prompt-Centric View - Feature {feature.feature_id}, Hook Point {feature.hook_name}"
+    # Define a function to get the tokens and activations for a given example
+    get_tokens_and_acts = lambda ex: (ex.str_tokens, ex.get_feature_activation(feature).tolist())
+    # Generate the prompt-centric view HTML content
+    return _generate_prompt_centric_view(examples, title, get_tokens_and_acts, True)
 
 def prompt_centric_view_direction(examples, encoder, hook_name, direction):
-    # Generate a view for a single example or a list of examples and a direction.
-    if not isinstance(examples, list):
-        examples = [examples]
-    html_content = f"<h2>Prompt-Centric View - Hook Point {hook_name}</h2>"
-    html_content += "<div class='examples-container'>"
-    # Iterate through each example, and create div
-    for i, example in enumerate(examples, 1):
-        str_tokens, acts = example.get_tokens_direction_scores(encoder, direction, hook_name)
-        html_content += f'<div class="example"><div class="example-label">Example {i}:</div>'
-        html_content += _generate_highlighted_html(str_tokens, acts, use_orange_highlight=False)
-        html_content += '</div>'
-    html_content += "</div>"
-    return _light_mode(html_content)    
-    
+    # Generate the title for the prompt-centric view
+    title = f"Prompt-Centric View - Hook Point {hook_name}"
+    # Define a function to get the tokens and activations for a given example
+    get_tokens_and_acts = lambda ex: ex.get_tokens_direction_scores(encoder, direction, hook_name)
+    # Generate the prompt-centric view HTML content
+    return _generate_prompt_centric_view(examples, title, get_tokens_and_acts, False)

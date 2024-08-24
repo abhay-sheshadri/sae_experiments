@@ -1,4 +1,5 @@
-act_caches*.pkl
+act_cache*.pkl
+*act_cache.pkl
 jupyter_logs/
 notebook_slurm.sh
 LAT.csv

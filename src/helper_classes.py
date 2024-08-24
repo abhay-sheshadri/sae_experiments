@@ -25,12 +25,13 @@ class Example():
             assert len(tokens.shape) == 1         # N_pos
         
         self.tokens = tokens.tolist()
-        self.str_tokens = [tokenizer.decode(token) for token in self.tokens]       
+        self.str_tokens = [tokenizer.decode(token) for token in self.tokens]  
+        self.text = "".join(self.str_tokens)     
         self.latent_data = latent_data
         
     def __str__(self):
         # Detokenize example
-        return "".join(self.str_tokens)
+        return self.text
 
     def get_feature_set(self):
         # Get every single feature_id that activates on this example
@@ -60,7 +61,7 @@ class Example():
             hook_points=[hook_name,]
         )[hook_name][0]
         # Get dot product between activations (n x d) and direction (d)
-        scores = activations @ direction
+        scores = activations.float() @ direction.float()
         return self.str_tokens, scores.tolist()
 
 

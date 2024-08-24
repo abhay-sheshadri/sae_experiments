@@ -1,6 +1,8 @@
 import json
 import os
+import warnings
 
+from huggingface_hub import hf_hub_download
 import numpy as np
 import torch
 from torch import nn
@@ -90,7 +92,8 @@ class SparseAutoencoder:
             padding="longest",  # Pad to the longest sequence in the batch
             max_length=max_length,
             truncation=True,
-            return_attention_mask=True
+            return_attention_mask=True,
+            add_special_tokens=False
         )
         input_ids = tokens["input_ids"]
         attention_mask = tokens["attention_mask"]
@@ -152,7 +155,8 @@ class SparseAutoencoder:
             padding="longest",  # Pad to the longest sequence in the batch
             max_length=1024,
             truncation=True,
-            return_attention_mask=True
+            return_attention_mask=True,
+            add_special_tokens=False
         )
         tokens = tokenizer_output["input_ids"]
         attention_mask = tokenizer_output["attention_mask"]
@@ -179,6 +183,68 @@ class SparseAutoencoder:
             ))
         return examples
 
+    def format_inputs(self, prompt, system_prompt=None):
+        #Format input for language models using the tokenizer's chat template.
+        def format_single_input(single_prompt):
+            # Format a single prompt with optional system message using the tokenizer's chat template.
+            # Prepare messages in the format expected by chat models
+            messages = []
+            # Add system prompt if provided
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            # Add user prompt
+            messages.append({"role": "user", "content": single_prompt})
+            try:
+                # Use the tokenizer's chat template
+                return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except AttributeError:
+                warnings.warn(
+                    "The provided tokenizer does not have the 'apply_chat_template' method. "
+                    "Falling back to a simple format. This may not be optimal for all models.",
+                    UserWarning
+                )
+                # Simple fallback format
+                formatted = ""
+                if system_prompt:
+                    formatted += f"{system_prompt}\n"
+                formatted += f"{single_prompt}"
+                # Add BOS token if available
+                bos_token = getattr(self.tokenizer, 'bos_token', '')
+                return f"{bos_token}{formatted}"
+        # Handle input based on whether it's a single string or a list of strings
+        if isinstance(prompt, str):
+            return format_single_input(prompt)
+        elif isinstance(prompt, list):
+            return [format_single_input(p) for p in prompt]
+        else:
+            raise ValueError("prompt must be either a string or a list of strings")
+    
+    def sample_generations(self, prompts, format_inputs=True, batch_size=4, system_prompt=None, **generation_kwargs):
+        # Format inputs if requested
+        if format_inputs:
+            prompts = self.format_inputs(prompts, system_prompt)
+        all_generations = []
+        # Process prompts in batches
+        for i in range(0, len(prompts), batch_size):
+            batch_prompts = prompts[i:i+batch_size]
+            # Tokenize inputs
+            inputs = self.tokenizer(batch_prompts, return_tensors="pt", padding=True, truncation=True, add_special_tokens=False)
+            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+            # Generate text
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    num_return_sequences=1,
+                    **generation_kwargs
+                )
+            # Decode generated text
+            batch_generations = self.tokenizer.batch_decode(outputs)
+            batch_generations = [gen.replace(self.tokenizer.pad_token, "") for gen in batch_generations]
+            all_generations.extend(batch_generations)
+        return self.get_examples_from_generations(all_generations)
+
+        
     def _fix_input_shape(self, acts):
         if len(acts.shape) == 0:
             raise Exception("0-dimensional input")
@@ -340,6 +406,24 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
             hook_name=f"model.layers.{layer}", # The SAE reads in the output of this block
             *args, **kwargs
         )
+    
+    @staticmethod
+    def load_pythia_sae(layer, model_size="160m", deduped=True, *args, **kwargs):
+        # Loading Pythia SAEs trained by EleutherAI
+        assert model_size in ["70m", "160m"], "Residual stream SAEs are only available for 70m and 160m models"
+        # Load the model from huggingface
+        model_name = f"EleutherAI/pythia-{model_size}-deduped" if deduped else f"EleutherAI/pythia-{model_size}"
+        model, tokenizer = load_hf_model_and_tokenizer(model_name)
+        # Load SAE using Eleuther library
+        sae_name = f"EleutherAI/sae-pythia-{model_size}-deduped-32k" if deduped else f"EleutherAI/sae-pythia-{model_size}-32k"
+        sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+        return EleutherSparseAutoencoder(
+            model=model,
+            tokenizer=tokenizer,
+            encoder=sae,
+            hook_name=f"model.layers.{layer}", # The SAE reads in the output of this block
+            *args, **kwargs
+        )
 
 
 class DeepmindSparseAutoencoder(SparseAutoencoder):
@@ -398,10 +482,9 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         model_name = "google/gemma-2-9b-it" if instruct else "google/gemma-2-9b"
         model, tokenizer = load_hf_model_and_tokenizer(model_name)
         # Download/Load the sae 
-        bucket_path = f'gs://gemma-2-saes/release-preview/gemmascope-9b-pt-res/layer_{layer}/width_{width//10**3}k/average_l0_{l0}'
-        local_path = os.path.join('gemma-2-saes', 'release-preview', 'gemmascope-9b-pt-res', f'layer_{layer}', f'width_{width//10**3}k')
-        sae_path = get_bucket_folder(bucket_path, local_path)
-        sae_path = os.path.join(sae_path, f'average_l0_{l0}', 'params.npz')
+        repo_id = "google/gemma-scope-9b-pt-res"
+        filename = f"layer_{layer}/width_{width//10**3}k/average_l0_{l0}/params.npz"
+        sae_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="model")
         # Load sae weights into module
         sae = GenericSaeModule(d_model=model.config.hidden_size, d_sae=width).cuda().to(torch.bfloat16)
         sae.load_state_dict(DeepmindSparseAutoencoder.load_npz_weights(sae_path, torch.bfloat16, "cuda"))

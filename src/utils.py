@@ -63,7 +63,7 @@ def load_hf_model(
             trust_remote_code=True,
         ).eval()
     # Disable model grad if we're not training
-    if not requires_grad:
+    if not requires_grad:   
         model.requires_grad_(False)
     # Save and return the model
     loaded_models[model_name] = model
@@ -92,6 +92,7 @@ def load_hf_model_and_tokenizer(
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     tokenizer.padding_side = "left"
     tokenizer.pad_token_id = tokenizer.eos_token_id
+    model.generation_config.eos_token_id = tokenizer.eos_token_id # Make sure the eos in the generation config is the same as the tokenizer
     return model, tokenizer
 
 
@@ -129,7 +130,7 @@ def forward_pass_with_hooks(model, input_ids, hook_points, attention_mask=None):
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.autocast(device_type="cuda"):
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -160,7 +161,7 @@ def forward_pass_with_interventions(model, input_ids, hook_interventions, attent
         hooks.append(hook)
     try:
         # Perform the forward pass
-        with torch.autocast(device_type="cuda"):
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype):
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     finally:
         # Remove the hooks
@@ -194,7 +195,7 @@ def generate_with_interventions(model, input_ids, hook_interventions, max_new_to
         hooks.append(hook)
     try:
         # Perform the generation process with interventions in place
-        with torch.autocast(device_type="cuda"), torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype), torch.no_grad():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,

@@ -5,3 +5,4 @@ notebook_slurm.sh
 LAT.csv
 .env
 google_credentials.json
+*.pyc

@@ -6,3 +6,5 @@ LAT.csv
 .env
 google_credentials.json
 *.pyc
+linear_probes.pkl
+mlp_probes.pkl

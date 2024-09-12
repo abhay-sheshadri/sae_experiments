@@ -7,8 +7,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, load_dataset
 from simple_parsing import field, parse
-from transformers import (AutoModel, AutoTokenizer, BitsAndBytesConfig,
-                          PreTrainedModel)
+from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 
 from .data import chunk_and_tokenize
 from .trainer import SaeTrainer, TrainConfig

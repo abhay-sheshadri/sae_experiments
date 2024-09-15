@@ -133,6 +133,7 @@ class SparseAutoencoder:
         max_length=1024,
         return_tokens=False,
         use_memmap=None,
+        only_return_layers=None,
     ):
         # Ensure max_length doesn't exceed the model's maximum
         max_length = min(self.tokenizer.model_max_length, max_length)
@@ -187,13 +188,16 @@ class SparseAutoencoder:
                 metadata["tokens_dtype"] = "int32"
 
             # Create memmaps for each layer with the correct shape
-            layer_memmaps = []
-            for layer in range(num_layers):
+            layer_memmaps = {}
+            layers_to_return = (
+                range(num_layers) if only_return_layers is None else only_return_layers
+            )
+            for layer in layers_to_return:
                 memmap_file = f"{use_memmap}_residual_act_layer_{layer}.dat"
                 memmap = np.memmap(
                     memmap_file, dtype="float16", mode="w+", shape=full_shape
                 )
-                layer_memmaps.append(memmap)
+                layer_memmaps[layer] = memmap
                 metadata["files"][f"layer_{layer}"] = os.path.basename(memmap_file)
 
             # Save metadata
@@ -201,12 +205,18 @@ class SparseAutoencoder:
             with open(metadata_file, "w") as f:
                 json.dump(metadata, f, indent=2)
         else:
-            # Pre-allocate the full tensor for all layers
-            all_residual_acts = [
-                torch.empty((input_ids.size(0), input_ids.size(1), self.model.config.hidden_size),
-                            dtype=torch.float16, device='cpu')
-                for _ in range(self.model.config.num_hidden_layers)
-            ]
+            # Pre-allocate the full tensor for required layers
+            layers_to_return = (
+                range(num_layers) if only_return_layers is None else only_return_layers
+            )
+            all_residual_acts = {
+                layer: torch.empty(
+                    (input_ids.size(0), input_ids.size(1), hidden_dim),
+                    dtype=torch.float16,
+                    device="cpu",
+                )
+                for layer in layers_to_return
+            }
 
         # Process input in batches
         for i in tqdm(range(0, input_ids.size(0), batch_size)):
@@ -217,26 +227,26 @@ class SparseAutoencoder:
             )
 
             # Get residual activations for the batch
-            batch_residual_acts = get_all_residual_acts(
-                self.model, batch_input_ids, batch_attention_mask, batch_size
+            batch_residual_acts = get_all_residual_acts_unbatched(
+                self.model, batch_input_ids, batch_attention_mask, only_return_layers
             )
 
-            # Apply attention mask to the activations
-            masked_batch_residual_acts = [
-                (act * batch_attention_mask.unsqueeze(-1).to(act.dtype)).cpu()
-                for act in batch_residual_acts
-            ]
+            # Apply attention mask to the activations and move to CPU
+            masked_batch_residual_acts = {
+                layer: (act * batch_attention_mask.unsqueeze(-1).to(act.dtype))
+                .cpu()
+                .to(torch.float16)
+                for layer, act in batch_residual_acts.items()
+            }
 
             if use_memmap:
                 # Write the batch data to the memmaps
-                for layer, act in enumerate(masked_batch_residual_acts):
-                    layer_memmaps[layer][i : i + batch_size] = act.to(
-                        torch.float16
-                    ).numpy()
+                for layer, act in masked_batch_residual_acts.items():
+                    layer_memmaps[layer][i : i + batch_size] = act.numpy()
             else:
                 # Directly assign the batch results to the pre-allocated tensors
-                for layer, act in enumerate(masked_batch_residual_acts):
-                    all_residual_acts[layer][i : i + batch_size] = act.to(torch.float16)
+                for layer, act in masked_batch_residual_acts.items():
+                    all_residual_acts[layer][i : i + batch_size] = act
 
         # Return the residual activations
         if return_tokens:

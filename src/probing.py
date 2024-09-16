@@ -1,12 +1,13 @@
+import json
+import os
+
 import numpy as np
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from accelerate import find_executable_batch_size
 from torch import nn
 from tqdm.auto import tqdm
-import os
-import json
-from accelerate import find_executable_batch_size
 
 
 class Probe(nn.Module):
@@ -52,7 +53,7 @@ class NonlinearProbe(Probe):
 class AttentionProbe(Probe):
     # Attention probe for transformer activations with lower dimensional projection
 
-    def __init__(self, d_model, d_proj, nhead):
+    def __init__(self, d_model, d_proj, nhead, max_length=8192, sliding_window=None):
         super(AttentionProbe, self).__init__()
         self.d_model = d_model
         self.d_proj = d_proj
@@ -61,6 +62,23 @@ class AttentionProbe(Probe):
         self.k_proj = nn.Linear(d_model, d_proj * nhead)
         self.v_proj = nn.Linear(d_model, d_proj * nhead)
         self.out_proj = nn.Linear(d_proj * nhead, 1)
+        if sliding_window is not None:
+            mask = self._construct_sliding_window_mask(max_length, sliding_window)
+        else:
+            mask = self._construct_causal_mask(max_length)
+        self.mask = nn.Parameter(mask, requires_grad=False)
+
+    def _construct_causal_mask(self, seq_len):
+        mask = torch.ones(seq_len, seq_len)
+        mask = torch.tril(mask, diagonal=0)
+        return mask.to(dtype=torch.bool)
+
+    def _construct_sliding_window_mask(self, seq_len, window_size):
+        q_idx = torch.arange(seq_len).unsqueeze(1)
+        kv_idx = torch.arange(seq_len).unsqueeze(0)
+        causal_mask = q_idx >= kv_idx
+        windowed_mask = q_idx - kv_idx < window_size
+        return causal_mask & windowed_mask
 
     def forward(self, x):
         x = super().forward(x)
@@ -80,7 +98,9 @@ class AttentionProbe(Probe):
             .view(batch_size, seq_len, self.nhead, self.d_proj)
             .transpose(1, 2)
         )
-        attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=self.mask[:seq_len, :seq_len]
+        )
         attn_output = (
             attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         )
@@ -99,7 +119,9 @@ class DirectionalProbe(Probe):
         # Normalize the direction vector
         direction = direction / torch.norm(direction, dim=0, keepdim=True)
         self.direction = nn.Parameter(direction, requires_grad=False)
-        self.magnitude = nn.Parameter(torch.tensor(1.0), requires_grad=True) #  We can train this to calibrate the probe
+        self.magnitude = nn.Parameter(
+            torch.tensor(1.0), requires_grad=True
+        )  #  We can train this to calibrate the probe
 
     def forward(self, x):
         x = super().forward(x)
@@ -111,7 +133,9 @@ class EncoderProbe(Probe):
     pass
 
 
-def initialize_probes_and_optimizers(layers, create_probe_fn, lr, device, pretrained_probes=None):
+def initialize_probes_and_optimizers(
+    layers, create_probe_fn, lr, device, pretrained_probes=None
+):
     # Initialize probes and their corresponding optimizers for each layer
     if pretrained_probes is not None:
         print("Using pretrained probes...")
@@ -324,7 +348,7 @@ def train_probe(
     encoder.model.to("cpu")
     torch.cuda.empty_cache()
 
-    # Initialize probes and optimizers for each layer, and loss criterion        
+    # Initialize probes and optimizers for each layer, and loss criterion
     probes, optimizers = initialize_probes_and_optimizers(
         layers, create_probe_fn, lr, device, pretrained_probes
     )
@@ -417,11 +441,23 @@ def train_nonlinear_probe(
 
 
 def train_attention_probe(
-    encoder, positive_examples, negative_examples, d_proj, nhead, layers, **kwargs
+    encoder,
+    positive_examples,
+    negative_examples,
+    d_proj,
+    nhead,
+    sliding_window,
+    layers,
+    **kwargs,
 ):
     # Train an attention probe for each specified layer
     def create_attention_probe():
-        return AttentionProbe(encoder.model.config.hidden_size, d_proj, nhead)
+        return AttentionProbe(
+            encoder.model.config.hidden_size,
+            d_proj,
+            nhead,
+            sliding_window=sliding_window,
+        )
 
     return train_probe(
         encoder,
@@ -443,29 +479,35 @@ def load_probes(load_path):
     return torch.load(load_path)
 
 
-def get_probe_scores(probes, encoder, examples, batch_size, max_length, device="cuda", probe_layers=None):
+def get_probe_scores(
+    probes, encoder, examples, batch_size, max_length, device="cuda", probe_layers=None
+):
+    # If probe_layers is not defined, set it to all the layers
+    if probe_layers is None:
+        probe_layers = list(probes.keys())
+
     # Cache activations for a set of examples using the encoder
     initial_padding_side = encoder.tokenizer.padding_side
     encoder.tokenizer.padding_side = "right"  # Use right padding
-    
+
     @find_executable_batch_size(starting_batch_size=batch_size)
     def get_activations(batch_size):
         return encoder.get_model_residual_acts(
-            examples, batch_size=batch_size, max_length=max_length, return_tokens=True
+            examples,
+            batch_size=batch_size,
+            max_length=max_length,
+            return_tokens=True,
+            only_return_layers=probe_layers,
         )
-    
-    activations, tokens = get_activations()
 
+    activations, tokens = get_activations()
     encoder.tokenizer.padding_side = initial_padding_side
 
     # Get probe scores for a set of examples
     probe_scores = {}
-    
-    if probe_layers is None:
-        probe_layers = list(probes.keys())
 
     @find_executable_batch_size(starting_batch_size=batch_size)
-    def get_probe_scores_batch_size(batch_size):    
+    def get_probe_scores_batch_size(batch_size):
         for layer in probe_layers:
             probe = probes[layer]
             probe.to(device)
@@ -480,9 +522,9 @@ def get_probe_scores(probes, encoder, examples, batch_size, max_length, device="
                     batch = layer_activations[i : i + batch_size].to(device)
                     with torch.autocast(device_type=device):
                         batch_scores = probe(batch)
-                        #if isinstance(probe, DirectionalProbe):
+                        # if isinstance(probe, DirectionalProbe):
                         #    batch_scores = batch_scores.detach().cpu().numpy()
-                        #else:
+                        # else:
                         batch_scores = (
                             torch.sigmoid(batch_scores).detach().cpu().numpy() * 2 - 1
                         ) * 3
@@ -491,16 +533,25 @@ def get_probe_scores(probes, encoder, examples, batch_size, max_length, device="
             probe_scores[layer] = np.concatenate(layer_scores)
             probe.to("cpu")  # Move the probe back to CPU to free up GPU memory
         return probe_scores
-    
+
     probe_scores = get_probe_scores_batch_size()
+    activations.clear()
+
     # Get the (token, score) pairs for each example
     paired_scores = {}
     for layer, scores in probe_scores.items():
         paired_scores[layer] = [
             [
-                (encoder.tokenizer.decode(tokens["input_ids"][example_idx][token_idx].item()), scores[example_idx][token_idx])
+                (
+                    encoder.tokenizer.decode(
+                        tokens["input_ids"][example_idx][token_idx].item()
+                    ),
+                    scores[example_idx][token_idx],
+                )
                 for token_idx in range(tokens["input_ids"].shape[1])
-                if tokens["attention_mask"][example_idx][token_idx].item()  # Skip padding tokens
+                if tokens["attention_mask"][example_idx][
+                    token_idx
+                ].item()  # Skip padding tokens
             ]
             for example_idx in range(tokens["input_ids"].shape[0])
         ]

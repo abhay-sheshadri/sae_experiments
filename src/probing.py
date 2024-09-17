@@ -557,3 +557,42 @@ def get_probe_scores(
         ]
 
     return paired_scores
+
+from torch.utils.data import Dataset
+import einops
+class AttentionDataset(Dataset):
+    def __init__(self, benign_data=None, harmful_data=None, cache_data=None, labels=None):
+        if cache_data is None:
+            self.benign_data = benign_data
+            self.harmful_data = harmful_data
+            self.benign_labels = torch.zeros(len(benign_data))
+            self.harmful_labels = torch.ones(len(harmful_data))
+            self.data = list(zip(self.benign_data, self.benign_labels)) + list(zip(self.harmful_data, self.harmful_labels))
+        else:
+            if labels is None:
+                labels = -torch.ones(len(cache_data))
+            self.data = list(zip(cache_data, labels))
+        np.random.shuffle(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+def attn_dataset_collate_fn(batch):
+    # Get the maximum length in the batch
+    max_len = max(x[0].shape[0] for x in batch)
+    d_model = batch[0][0].shape[1]
+    
+    # Pad all tensors to the maximum length (right padding)
+    padded_data = [F.pad(x[0], (0, 0, 0, max_len - x[0].shape[0])) for x in batch]
+    batch_labels = torch.tensor([x[1] for x in batch])
+    labels = einops.repeat(batch_labels, "b -> b n", n=max_len)
+    
+    # Stack the padded tensors and labels
+    padded_data = torch.stack(padded_data).float()    
+    # Create label_mask
+    label_mask = torch.stack([torch.cat([torch.ones(x[0].shape[0]), torch.zeros(max_len - x[0].shape[0])]) for x in batch]).bool()
+    
+    return padded_data, labels, label_mask

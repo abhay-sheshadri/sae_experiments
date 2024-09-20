@@ -126,7 +126,7 @@ tomli==2.0.1
 tornado==6.4
 tqdm==4.66.5
 traitlets==5.14.2
-transformer-lens==2.5.0
+transformer-lens
 transformers==4.44.2
 triton==2.2.0
 typeguard==2.13.3

@@ -2,6 +2,7 @@ import heapq
 import os
 import subprocess
 
+import numpy as np
 import torch
 from huggingface_hub import list_repo_files
 from peft import AutoPeftModelForCausalLM
@@ -276,15 +277,25 @@ def generate_with_interventions(
     return outputs
 
 
-def get_all_residual_acts(model, input_ids, attention_mask=None, batch_size=32):
+def get_all_residual_acts(
+    model, input_ids, attention_mask=None, batch_size=32, only_return_layers=None
+):
     # Ensure the model is in evaluation mode
     model.eval()
 
     # Get the number of layers in the model
     num_layers = model.config.num_hidden_layers
 
-    # Initialize a list to store all hidden states
-    all_hidden_states = []
+    # Determine which layers to return
+    layers_to_return = (
+        set(range(num_layers))
+        if only_return_layers is None
+        else set(only_return_layers)
+    )
+    layers_to_return = {layer for layer in layers_to_return if 0 <= layer < num_layers}
+
+    # Initialize the accumulator for hidden states
+    accumulated_hidden_states = {}
 
     # Process input in batches
     for i in range(0, input_ids.size(0), batch_size):
@@ -294,27 +305,57 @@ def get_all_residual_acts(model, input_ids, attention_mask=None, batch_size=32):
         )
 
         # Forward pass with output_hidden_states=True to get all hidden states
-        outputs = model(
-            batch_input_ids,
-            attention_mask=batch_attention_mask,
-            output_hidden_states=True,
-        )
+        with torch.no_grad():  # Disable gradient computation
+            outputs = model(
+                batch_input_ids,
+                attention_mask=batch_attention_mask,
+                output_hidden_states=True,
+            )
 
         # The hidden states are typically returned as a tuple, with one tensor per layer
         # We want to exclude the embedding layer (first element) and get only the residual activations
         batch_hidden_states = outputs.hidden_states[1:]  # Exclude embedding layer
 
-        # Append to our list
-        all_hidden_states.append(batch_hidden_states)
+        # Accumulate the required layers
+        for layer in layers_to_return:
+            if layer not in accumulated_hidden_states:
+                accumulated_hidden_states[layer] = batch_hidden_states[layer]
+            else:
+                accumulated_hidden_states[layer] = torch.cat(
+                    [accumulated_hidden_states[layer], batch_hidden_states[layer]],
+                    dim=0,
+                )
 
-    # Concatenate all batches
-    # This will give us a list of tensors, where each tensor is the hidden states for a layer
-    # The shape of each tensor will be (total_examples, sequence_length, hidden_size)
-    concatenated_hidden_states = [
-        torch.cat([batch[layer] for batch in all_hidden_states], dim=0)
-        for layer in range(num_layers)
-    ]
-    return concatenated_hidden_states
+    return accumulated_hidden_states
+
+
+def get_all_residual_acts_unbatched(
+    model, input_ids, attention_mask=None, only_return_layers=None
+):
+    # Get the number of layers in the model
+    num_layers = model.config.num_hidden_layers
+
+    # Determine which layers to return
+    layers_to_return = (
+        set(range(num_layers))
+        if only_return_layers is None
+        else set(only_return_layers)
+    )
+    layers_to_return = {layer for layer in layers_to_return if 0 <= layer < num_layers}
+
+    # Forward pass with output_hidden_states=True to get all hidden states
+    outputs = model(
+        input_ids,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+    )
+
+    # The hidden states are typically returned as a tuple, with one tensor per layer
+    # We want to exclude the embedding layer (first element) and get only the residual activations
+    hidden_states = outputs.hidden_states[1:]  # Exclude embedding layer
+
+    # Extract and return only the required layers
+    return {layer: hidden_states[layer] for layer in layers_to_return}
 
 
 def get_bucket_folder(bucket_path, local_path):
@@ -463,3 +504,66 @@ def normalize_last_dim(tensor):
     # We add a small epsilon to avoid division by zero
     normalized_tensor = tensor / (norm + 1e-8)
     return normalized_tensor
+
+
+def get_valid_indices(tokens, only_return_on_tokens_between):
+    # Get indices of tokens between start and end tokens
+
+    valid_indices = []
+    start_token, end_token = only_return_on_tokens_between
+    include_indices = False
+
+    for i, token in enumerate(tokens):
+        if token == start_token:
+            include_indices = True
+        elif token == end_token:
+            include_indices = False
+        elif include_indices:
+            valid_indices.append(i)
+
+    return valid_indices
+
+
+def get_valid_token_mask(tokens, only_return_on_tokens_between):
+    # Get a mask of tokens between start and end tokens
+
+    if tokens.dim() not in (1, 2):
+        raise ValueError("Input tensor must be 1D or 2D")
+
+    if tokens.dim() == 1:
+        tokens = tokens.unsqueeze(0)
+
+    batch_size, seq_length = tokens.shape
+    start_token, end_token = only_return_on_tokens_between
+
+    # Initialize the mask with zeros
+    mask = torch.zeros((batch_size, seq_length), dtype=torch.bool, device=tokens.device)
+
+    for i in range(batch_size):
+        include_indices = False
+        for j in range(seq_length):
+            if tokens[i, j] == start_token:
+                include_indices = True
+            elif tokens[i, j] == end_token:
+                include_indices = False
+            elif include_indices:
+                mask[i, j] = True
+
+    return mask.squeeze(0) if tokens.dim() == 1 else mask
+
+
+def convert_float16(obj):
+    if isinstance(obj, dict):
+        return {k: convert_float16(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_float16(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_float16(v) for v in obj)
+    elif isinstance(obj, np.float16):
+        return float(obj)
+    elif isinstance(obj, np.ndarray) and obj.dtype == np.float16:
+        return obj.astype(float)
+    elif isinstance(obj, torch.Tensor) and obj.dtype == torch.float16:
+        return obj.float()
+    else:
+        return obj

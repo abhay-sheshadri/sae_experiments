@@ -154,10 +154,16 @@ def compute_steering_vector(
 
     # Get the activations for the positive and negative examples
     positive_acts, postive_tokens = encoder.get_model_residual_acts(
-        positive_examples, batch_size=batch_size, return_tokens=True
+        positive_examples,
+        batch_size=batch_size,
+        return_tokens=True,
+        only_return_layers=layers,
     )
     negative_acts, negative_tokens = encoder.get_model_residual_acts(
-        negative_examples, batch_size=batch_size, return_tokens=True
+        negative_examples,
+        batch_size=batch_size,
+        return_tokens=True,
+        only_return_layers=layers,
     )
 
     # Get the steering vector for each layer
@@ -216,6 +222,8 @@ def compute_steering_vector(
     return result
 
 
+### OLD ADVEXES CODE ###
+
 def run_soft_prompt_opt(
     encoder,
     input_ids,
@@ -231,6 +239,7 @@ def run_soft_prompt_opt(
     reconstruct_attack=False,
     sae_l1_penalty=0.0001,
     attack_init=None,
+    probes={},
 ):
     # Make sure magnitude has a value
     if magnitude is None:

@@ -1,13 +1,20 @@
 import json
 import os
+import random
 
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from accelerate import find_executable_batch_size
+from peft import LoraConfig, get_peft_model
+from sklearn.metrics import f1_score
 from torch import nn
 from tqdm.auto import tqdm
+
+from .utils import convert_float16, get_valid_indices, get_valid_token_mask
 
 
 class Probe(nn.Module):
@@ -122,15 +129,28 @@ class DirectionalProbe(Probe):
         self.magnitude = nn.Parameter(
             torch.tensor(1.0), requires_grad=True
         )  #  We can train this to calibrate the probe
+        self.bias = nn.Parameter(
+            torch.tensor(0.0), requires_grad=True
+        )  #  We can train this to calibrate the probe
 
     def forward(self, x):
         x = super().forward(x)
-        return torch.matmul(x, self.direction * self.magnitude).squeeze(-1)
+        return torch.matmul(x, self.direction * self.magnitude).squeeze(-1) + self.bias
 
 
 class EncoderProbe(Probe):
     # Wrapper class around an SAE encoder to serve as a harmfulness_probe
-    pass
+
+    def __init__(self, encoder, feature_ids):
+        super(EncoderProbe, self).__init__()
+        self.encoder = encoder
+        self.feature_ids = nn.Paramter(torch.tensor(feature_ids), requires_grad=False)
+        self.linear = nn.Linear(len(feature_ids), 1)
+
+    def forward(self, x):
+        x = super().forward(x)
+
+        return self.encoder(x).squeeze(-1)
 
 
 def initialize_probes_and_optimizers(
@@ -229,12 +249,16 @@ def train_layer(
     return layer, probe, total_losses
 
 
-def cache_activations(encoder, examples, batch_size, max_length, cache_dir):
+def cache_activations(encoder, examples, batch_size, max_length, cache_dir, **kwargs):
     # Cache activations for a set of examples using the encoder
     initial_padding_side = encoder.tokenizer.padding_side
     encoder.tokenizer.padding_side = "right"  # Use right padding
     activations = encoder.get_model_residual_acts(
-        examples, batch_size=batch_size, max_length=max_length, use_memmap=cache_dir
+        examples,
+        batch_size=batch_size,
+        max_length=max_length,
+        use_memmap=cache_dir,
+        **kwargs,
     )
     encoder.tokenizer.padding_side = initial_padding_side
     return activations
@@ -255,6 +279,7 @@ def train_probe(
     device="cuda",
     cache_activations_save_path=None,
     pretrained_probes=None,
+    **kwargs,
 ):
     # Main function to train probes for all specified layers
 
@@ -312,13 +337,14 @@ def train_probe(
         # Cache activations for the positive and negative examples, without memmaps
         if cache_activations_save_path is None:
             positive_activations = cache_activations(
-                encoder, positive_examples, batch_size, max_length
+                encoder, positive_examples, batch_size, max_length, **kwargs
             )
             negative_activations = cache_activations(
                 encoder,
                 negative_examples,
                 batch_size,
                 max_length,
+                **kwargs,
             )
 
         # Cache activations for the positive and negative examples, with memmaps
@@ -335,6 +361,7 @@ def train_probe(
                 batch_size,
                 max_length,
                 cache_dir=positive_path,
+                **kwargs,
             )
             negative_activations = cache_activations(
                 encoder,
@@ -342,6 +369,7 @@ def train_probe(
                 batch_size,
                 max_length,
                 cache_dir=negative_path,
+                **kwargs,
             )
 
     # Move model to CPU and clear GPU memory, to save VRAM for probe training
@@ -480,7 +508,14 @@ def load_probes(load_path):
 
 
 def get_probe_scores(
-    probes, encoder, examples, batch_size, max_length, device="cuda", probe_layers=None
+    probes,
+    encoder,
+    examples,
+    batch_size,
+    max_length,
+    device="cuda",
+    probe_layers=None,
+    only_return_on_tokens_between=None,
 ):
     # If probe_layers is not defined, set it to all the layers
     if probe_layers is None:
@@ -522,9 +557,6 @@ def get_probe_scores(
                     batch = layer_activations[i : i + batch_size].to(device)
                     with torch.autocast(device_type=device):
                         batch_scores = probe(batch)
-                        # if isinstance(probe, DirectionalProbe):
-                        #    batch_scores = batch_scores.detach().cpu().numpy()
-                        # else:
                         batch_scores = (
                             torch.sigmoid(batch_scores).detach().cpu().numpy() * 2 - 1
                         ) * 3
@@ -556,4 +588,273 @@ def get_probe_scores(
             for example_idx in range(tokens["input_ids"].shape[0])
         ]
 
+    if only_return_on_tokens_between is not None:
+        for layer in paired_scores:
+            for example_idx in range(len(paired_scores[layer])):
+                tokens = [token for token, _ in paired_scores[layer][example_idx]]
+                valid_indices = get_valid_indices(tokens, only_return_on_tokens_between)
+                paired_scores[layer][example_idx] = [
+                    (token, score) if i in valid_indices else (token, None)
+                    for i, (token, score) in enumerate(
+                        paired_scores[layer][example_idx]
+                    )
+                ]
     return paired_scores
+
+
+def get_annotated_dataset(
+    probes, encoder, dataset, splits, batch_size, max_length, **kwargs
+):
+    # Get scores
+    scores_dict = {}
+    dataset_splits = {
+        split: dataset[split].select(range(min(1000, len(dataset[split]))))
+        for split in splits
+    }
+    for split in splits:
+        print(split)
+
+        split_dataset = dataset_splits[split]
+        split_dataset_str = [
+            split_dataset[i]["prompt"] + split_dataset[i]["completion"]
+            for i in range(len(split_dataset))
+        ]
+
+        with torch.no_grad():
+            paired_scores = get_probe_scores(
+                probes=probes,
+                encoder=encoder,
+                examples=split_dataset_str,
+                batch_size=batch_size,
+                max_length=max_length,
+                **kwargs,
+            )
+        scores_dict[split] = paired_scores
+
+    return convert_float16(scores_dict)
+
+
+def vickrey_auc(scores, k):
+    # Compute the Vickrey AUC for a list of scores
+    # Returns the k-th highest score
+    if not scores:
+        raise ValueError("Scores list must be non-empty")
+    if k <= 0:
+        raise ValueError("k must be a positive integer")
+    k = min(k, len(scores))
+    return sorted(scores, reverse=True)[k - 1]
+
+
+def aggregate_across_layers(all_split_scores, layers, cross_layer_aggregation):
+    # Given the probe scores foor multiple layers, compute a single score for each token
+    aggregation_funcs = {
+        "mean": np.mean,
+        "max": np.max,
+        "min": np.min,
+        "median": np.median,
+        "vickrey": lambda x: vickrey_auc(x, 2),
+    }
+
+    if cross_layer_aggregation not in aggregation_funcs:
+        raise ValueError(f"Invalid cross_layer_aggregation: {cross_layer_aggregation}")
+
+    aggregation_func = aggregation_funcs[cross_layer_aggregation]
+
+    new_all_split_scores = {}
+    for split, split_scores in all_split_scores.items():
+        split_scores = {str(k): v for k, v in split_scores.items()}
+        new_split_scores = []
+
+        for example in zip(*(split_scores[str(layer)] for layer in layers)):
+            new_example = [
+                (
+                    token_scores[0][0],
+                    aggregation_func([score for _, score in token_scores]),
+                )
+                for token_scores in zip(*example)
+            ]
+            new_split_scores.append(new_example)
+
+        new_all_split_scores[split] = new_split_scores
+
+    return new_all_split_scores
+
+
+def aggregate_across_tokens(all_split_scores, cross_token_aggregation):
+    # Given the probe scores for each token, compute a single score for each example
+    aggregation_funcs = {
+        "mean": np.mean,
+        "max": np.max,
+        "min": np.min,
+        "median": np.median,
+        "vickrey": lambda x: vickrey_auc(x, 2),
+        "logsumexp": lambda x: np.log(np.exp(x).sum()),
+        "top_2_percent": lambda x: vickrey_auc(x, int(0.02 * len(x)) + 1),
+        "median_over_zero": lambda x: np.median([score for score in x if score > 0]),
+    }
+
+    if cross_token_aggregation not in aggregation_funcs:
+        raise ValueError(f"Invalid cross_token_aggregation: {cross_token_aggregation}")
+
+    aggregation_func = aggregation_funcs[cross_token_aggregation]
+
+    aggregated_scores = {}
+    min_score, max_score = float("inf"), float("-inf")
+
+    for split, split_scores in all_split_scores.items():
+        new_split_scores = []
+        for example in split_scores:
+            example_scores = [score for _, score in example if score is not None]
+            example_scalar = aggregation_func(example_scores)
+            new_split_scores.append(example_scalar)
+
+            min_score = min(min_score, min(example_scores))
+            max_score = max(max_score, max(example_scores))
+
+        aggregated_scores[split] = new_split_scores
+
+    return aggregated_scores, min_score, max_score
+
+
+def compute_f1(threshold, aggregated_scores, negative_splits, positive_splits):
+    # Compute the F1 score for a given threshold
+    y_true, y_pred = [], []
+    for split in negative_splits + positive_splits:
+        scores = aggregated_scores[split]
+        y_true.extend([0 if split in negative_splits else 1] * len(scores))
+        y_pred.extend([int(score >= threshold) for score in scores])
+    return f1_score(y_true, y_pred)
+
+
+def find_best_threshold(
+    aggregated_scores, negative_splits, positive_splits, min_score, max_score
+):
+    # Find the best threshold for the aggregated scores
+    thresholds = np.linspace(min_score, max_score, 1000)
+    f1_scores = [
+        compute_f1(t, aggregated_scores, negative_splits, positive_splits)
+        for t in thresholds
+    ]
+    best_idx = np.argmax(f1_scores)
+    return thresholds[best_idx], f1_scores[best_idx]
+
+
+def get_threshold_at_fpr(
+    aggregated_scores, negative_splits, min_score, max_score, target_fpr
+):
+    # Compute the minimum threshold that achieves a given false positive rate
+    thresholds = np.linspace(min_score, max_score, 1000)
+    
+    final_threshold = max_score
+    for threshold in reversed(thresholds):
+        # Calculate false positive rate at this threshold
+        fp = sum(score >= threshold for split in negative_splits for score in aggregated_scores[split])
+        tn = sum(score < threshold for split in negative_splits for score in aggregated_scores[split])
+        fpr = fp / (fp + tn)
+        
+        # If we've reached or exceeded the target FPR, return this threshold
+        if fpr <= target_fpr:
+            final_threshold = threshold
+    
+    return final_threshold
+
+
+def create_box_plot(aggregated_scores, best_threshold, best_f1, title, false_positive_rate, allowed_labels):
+    # Create a box plot of the aggregated scores
+    plt.figure(figsize=(12, 6))
+
+    data = [aggregated_scores[label] for label in allowed_labels]
+    labels = allowed_labels
+    colors = sns.color_palette("husl", n_colors=len(aggregated_scores))
+
+    bp = plt.boxplot(
+        data,
+        labels=labels,
+        patch_artist=True,
+        vert=False,
+        flierprops=dict(marker="x", markeredgecolor="black", markersize=5),
+        medianprops=dict(color="black"),
+        widths=0.5,
+    )
+
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+
+    plt.axvline(
+        best_threshold,
+        color="red",
+        linestyle="--",
+        linewidth=2,
+        label=f"Best Threshold: {best_threshold:.2f}",
+    )
+
+    plt.title(f"{title}\nBest F1 Score: {best_f1:.2f}", fontsize=14)
+    plt.xlabel("Score (Vickrey Auction)", fontsize=12)
+    plt.yticks(range(1, len(labels) + 1), labels, fontsize=10)
+
+    plt.gca().invert_yaxis()
+    plt.grid(axis="x", alpha=0.3)
+
+    legend_elements = [
+        plt.Line2D(
+            [0], [0], color="red", linestyle="--", linewidth=2, label=f"Threshold at {false_positive_rate*100:.2f}% FPR"
+        )
+    ]
+    legend_elements.extend(
+        [
+            plt.Rectangle((0, 0), 1, 1, fc=color, alpha=0.7, label=label)
+            for label, color in zip(labels, colors)
+        ]
+    )
+
+    plt.legend(
+        handles=legend_elements,
+        fontsize=8,
+        title="Categories",
+        title_fontsize=10,
+        loc="center left",
+        bbox_to_anchor=(1, 0.5),
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
+def generate_score_plots(
+    all_split_scores,
+    positive_splits,
+    negative_splits,
+    heldout_splits,
+    layers,
+    cross_token_aggregation,
+    cross_layer_aggregation=None,
+    false_positive_rate=0.05,
+    title="",
+):
+    if cross_layer_aggregation:
+        all_split_scores = aggregate_across_layers(
+            all_split_scores, layers, cross_layer_aggregation
+        )
+
+    aggregated_scores, min_score, max_score = aggregate_across_tokens(
+        all_split_scores, cross_token_aggregation
+    )
+
+    #best_threshold, best_f1 = find_best_threshold(
+    #    aggregated_scores, negative_splits, positive_splits, min_score, max_score
+    #)
+    best_threshold = get_threshold_at_fpr(
+        aggregated_scores, heldout_splits, min_score, max_score, false_positive_rate
+    )
+    best_f1 = compute_f1(best_threshold, aggregated_scores, negative_splits, positive_splits)
+
+    create_box_plot(aggregated_scores, best_threshold, best_f1, title, false_positive_rate, positive_splits + negative_splits + heldout_splits)
+
+    return (
+        list(aggregated_scores.values()),
+        list(aggregated_scores.keys()),
+        best_threshold,
+        best_f1,
+    )
+    

@@ -65,10 +65,13 @@ def _generate_highlighted_html(tokens, acts, use_orange_highlight=True):
     for token, act in zip(tokens, acts):
 
         # Format the activation value for display
-        act_display = f"{act:.2f}"  # Display activation with 2 decimal places
+        if act is None:
+            act_display = ""
+        else:
+            act_display = f"{act:.2f}"  # Display activation with 2 decimal places
 
         # Highlight token if act != 0
-        if act != 0:
+        if act is not None and act != 0:
 
             # Normalize activation, max at 1
             factor = min(abs(act) / 10, 1)

@@ -223,6 +223,8 @@ def compute_steering_vector(
 
 
 ### OLD ADVEXES CODE ###
+### USE ATTACKS.PY INSTEAD ###
+
 
 def run_soft_prompt_opt(
     encoder,

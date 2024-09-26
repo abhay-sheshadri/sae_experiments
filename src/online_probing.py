@@ -11,7 +11,10 @@ def initialize_lora_adapter(encoder, layers, lora_params):
     alpha = lora_params.get("alpha", 16)
     dropout = lora_params.get("dropout", 0.05)
     bias = lora_params.get("bias", "none")
-    target_modules = lora_params.get("target_modules", ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj"])
+    target_modules = lora_params.get(
+        "target_modules",
+        ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj"],
+    )
 
     # Define LoRA Configuration
     lora_config = LoraConfig(
@@ -68,7 +71,7 @@ def train_online_probe(
         padding=True,
         truncation=True,
         max_length=max_length,
-        return_tensors="pt"
+        return_tensors="pt",
     )
     positive_input_ids = positive_tokens["input_ids"]
     positive_attention_mask = positive_tokens["attention_mask"]
@@ -77,18 +80,18 @@ def train_online_probe(
         padding=True,
         truncation=True,
         max_length=max_length,
-        return_tensors="pt"
+        return_tensors="pt",
     )
     negative_input_ids = negative_tokens["input_ids"]
     negative_attention_mask = negative_tokens["attention_mask"]
-    
+
     if only_return_on_tokens_between is not None:
         pos_only_return_mask = get_valid_token_mask(
             positive_input_ids, only_return_on_tokens_between
         )
         zero_positive_mask = positive_attention_mask.clone()
         zero_positive_mask[~pos_only_return_mask] = 0
-        
+
         neg_only_return_mask = get_valid_token_mask(
             negative_input_ids, only_return_on_tokens_between
         )
@@ -97,27 +100,27 @@ def train_online_probe(
     else:
         zero_positive_mask = positive_attention_mask
         zero_negative_mask = negative_attention_mask
-    
+
     n_examples = min(len(positive_examples), len(negative_examples))
 
     for epoch in range(n_epochs):
         # Shuffle the examples
         perm = torch.randperm(n_examples)
-        
+
         total_probe_loss = 0
         total_kl_loss = 0
         total_loss = 0
-        
+
         accumulated_probe_loss = 0
         accumulated_kl_loss = 0
-        
+
         n_batches = n_examples // batch_size
-        
+
         for i in range(0, n_examples, batch_size):
             # Check if the batch is the last one
             if i + batch_size > n_examples:
                 break
-            
+
             # Get the batch
             batch_perm = perm[i : i + batch_size]
             pos_batch_input_ids = positive_input_ids[batch_perm].to(device)
@@ -126,7 +129,7 @@ def train_online_probe(
             neg_batch_attention_mask = negative_attention_mask[batch_perm].to(device)
             pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device)
             neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device)
-            
+
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
                 pos_output = lora_model(
@@ -134,18 +137,22 @@ def train_online_probe(
                     attention_mask=pos_batch_attention_mask,
                     output_hidden_states=True,
                 )
-                pos_acts = {layer: pos_output.hidden_states[layer+1] for layer in layers}
-            
+                pos_acts = {
+                    layer: pos_output.hidden_states[layer + 1] for layer in layers
+                }
+
             # Compute the positive probe losses
             pos_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
                     pos_probe_output = probe(pos_acts[layer]).view(-1)
                     pos_targets = torch.ones_like(pos_probe_output)
-                    pos_layer_loss = criterion(pos_probe_output[pos_batch_zero_mask.view(-1).bool()], 
-                                               pos_targets[pos_batch_zero_mask.view(-1).bool()])
+                    pos_layer_loss = criterion(
+                        pos_probe_output[pos_batch_zero_mask.view(-1).bool()],
+                        pos_targets[pos_batch_zero_mask.view(-1).bool()],
+                    )
                     pos_loss += pos_layer_loss
-            
+
             # Forward pass on negative examples
             with torch.autocast(device_type=device):
                 neg_output = lora_model(
@@ -154,18 +161,22 @@ def train_online_probe(
                     output_hidden_states=True,
                 )
                 neg_logits = neg_output.logits
-                neg_acts = {layer: neg_output.hidden_states[layer+1] for layer in layers}
-                
+                neg_acts = {
+                    layer: neg_output.hidden_states[layer + 1] for layer in layers
+                }
+
             # Compute the negative probe losses
             neg_loss = 0
             for layer, probe in probes.items():
                 with torch.autocast(device_type=device):
                     neg_probe_output = probe(neg_acts[layer]).view(-1)
                     neg_targets = torch.zeros_like(neg_probe_output)
-                    neg_layer_loss = criterion(neg_probe_output[neg_batch_zero_mask.view(-1).bool()], 
-                                               neg_targets[neg_batch_zero_mask.view(-1).bool()])
+                    neg_layer_loss = criterion(
+                        neg_probe_output[neg_batch_zero_mask.view(-1).bool()],
+                        neg_targets[neg_batch_zero_mask.view(-1).bool()],
+                    )
                     neg_loss += neg_layer_loss
-            
+
             # Compute KL divergence of logits from base model logits
             with torch.no_grad():
                 base_neg_output = encoder.model(
@@ -176,7 +187,7 @@ def train_online_probe(
             kl_loss = F.kl_div(
                 F.log_softmax(base_neg_output.logits, dim=-1),
                 F.softmax(neg_logits, dim=-1),
-                reduction='batchmean'
+                reduction="batchmean",
             )
 
             # Backward pass
@@ -189,7 +200,9 @@ def train_online_probe(
             accumulated_kl_loss += kl_loss.item() * n_grad_accum
 
             # Perform optimization step after accumulating gradients
-            if (i // batch_size + 1) % n_grad_accum == 0 or (i + batch_size) >= n_examples:
+            if (i // batch_size + 1) % n_grad_accum == 0 or (
+                i + batch_size
+            ) >= n_examples:
                 for optimizer in optimizers.values():
                     optimizer.step()
                     optimizer.zero_grad()
@@ -202,8 +215,10 @@ def train_online_probe(
                 total_loss += accumulated_probe_loss + accumulated_kl_loss
                 accumulated_probe_loss = 0
                 accumulated_kl_loss = 0
-        
-        print(f"Epoch {epoch+1}/{n_epochs}, Loss: {total_loss / n_batches:.4f}, "
-              f"Probe Loss: {total_probe_loss / n_batches:.4f}, KL Loss: {total_kl_loss / n_batches:.4f}")
+
+        print(
+            f"Epoch {epoch+1}/{n_epochs}, Loss: {total_loss / n_batches:.4f}, "
+            f"Probe Loss: {total_probe_loss / n_batches:.4f}, KL Loss: {total_kl_loss / n_batches:.4f}"
+        )
 
     return probes, lora_model

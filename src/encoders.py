@@ -238,7 +238,7 @@ class SparseAutoencoder:
             )
             batch_zero_positions_mask = zero_positions_mask[i : i + batch_size].to(
                 self.model.device
-            ) # Masked attention mask for only_return_on_tokens_between
+            )  # Masked attention mask for only_return_on_tokens_between
 
             # Get residual activations for the batch
             batch_residual_acts = get_all_residual_acts_unbatched(
@@ -614,7 +614,9 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 if v2
                 else "EleutherAI/sae-llama-3-8b-32x"
             )
-            sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+            sae = Sae.load_from_hub(
+                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+            )
             return EleutherSparseAutoencoder(
                 model=model,
                 tokenizer=tokenizer,
@@ -649,7 +651,9 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 if deduped
                 else f"EleutherAI/sae-pythia-{model_size}-32k"
             )
-            sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+            sae = Sae.load_from_hub(
+                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+            )
         return EleutherSparseAutoencoder(
             model=model,
             tokenizer=tokenizer,
@@ -738,7 +742,9 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
                 .to(torch.bfloat16)
             )
             sae.load_state_dict(
-                DeepmindSparseAutoencoder.load_npz_weights(sae_path, torch.bfloat16, "cuda")
+                DeepmindSparseAutoencoder.load_npz_weights(
+                    sae_path, torch.bfloat16, "cuda"
+                )
             )
         return DeepmindSparseAutoencoder(
             model=model,

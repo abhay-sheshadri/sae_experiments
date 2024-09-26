@@ -744,22 +744,37 @@ def get_threshold_at_fpr(
 ):
     # Compute the minimum threshold that achieves a given false positive rate
     thresholds = np.linspace(min_score, max_score, 1000)
-    
+
     final_threshold = max_score
     for threshold in reversed(thresholds):
         # Calculate false positive rate at this threshold
-        fp = sum(score >= threshold for split in negative_splits for score in aggregated_scores[split])
-        tn = sum(score < threshold for split in negative_splits for score in aggregated_scores[split])
+        fp = sum(
+            score >= threshold
+            for split in negative_splits
+            for score in aggregated_scores[split]
+        )
+        tn = sum(
+            score < threshold
+            for split in negative_splits
+            for score in aggregated_scores[split]
+        )
         fpr = fp / (fp + tn)
-        
+
         # If we've reached or exceeded the target FPR, return this threshold
         if fpr <= target_fpr:
             final_threshold = threshold
-    
+
     return final_threshold
 
 
-def create_box_plot(aggregated_scores, best_threshold, best_f1, title, false_positive_rate, allowed_labels):
+def create_box_plot(
+    aggregated_scores,
+    best_threshold,
+    best_f1,
+    title,
+    false_positive_rate,
+    allowed_labels,
+):
     # Create a box plot of the aggregated scores
     plt.figure(figsize=(12, 6))
 
@@ -798,7 +813,12 @@ def create_box_plot(aggregated_scores, best_threshold, best_f1, title, false_pos
 
     legend_elements = [
         plt.Line2D(
-            [0], [0], color="red", linestyle="--", linewidth=2, label=f"Threshold at {false_positive_rate*100:.2f}% FPR"
+            [0],
+            [0],
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Threshold at {false_positive_rate*100:.2f}% FPR",
         )
     ]
     legend_elements.extend(
@@ -841,15 +861,24 @@ def generate_score_plots(
         all_split_scores, cross_token_aggregation
     )
 
-    #best_threshold, best_f1 = find_best_threshold(
+    # best_threshold, best_f1 = find_best_threshold(
     #    aggregated_scores, negative_splits, positive_splits, min_score, max_score
-    #)
+    # )
     best_threshold = get_threshold_at_fpr(
         aggregated_scores, heldout_splits, min_score, max_score, false_positive_rate
     )
-    best_f1 = compute_f1(best_threshold, aggregated_scores, negative_splits, positive_splits)
+    best_f1 = compute_f1(
+        best_threshold, aggregated_scores, negative_splits, positive_splits
+    )
 
-    create_box_plot(aggregated_scores, best_threshold, best_f1, title, false_positive_rate, positive_splits + negative_splits + heldout_splits)
+    create_box_plot(
+        aggregated_scores,
+        best_threshold,
+        best_f1,
+        title,
+        false_positive_rate,
+        positive_splits + negative_splits + heldout_splits,
+    )
 
     return (
         list(aggregated_scores.values()),
@@ -857,4 +886,3 @@ def generate_score_plots(
         best_threshold,
         best_f1,
     )
-    

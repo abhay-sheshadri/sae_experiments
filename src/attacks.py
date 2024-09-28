@@ -281,14 +281,32 @@ def zero_nan_grads(model):
         print(f"{type(name)} has nan gradient. Setting it to zero.")
 
 
-def compute_adversarial_loss(model, towards_tokens, towards_labels_mask, coef, losses):
+def compute_adversarial_loss(
+    model, towards_tokens, towards_labels_mask, coef, probe_loss_coef, losses, probes
+):
     with torch.autocast(device_type="cuda"):
-        logits = model(input_ids=towards_tokens).logits
+        model_output = model(
+            input_ids=towards_tokens, output_hidden_states=probes is not None
+        )
+        logits = model_output.logits
         final_logits = logits[:, :-1][towards_labels_mask[:, 1:]]
         towards_labels = towards_tokens[:, 1:][towards_labels_mask[:, 1:]]
         toward_loss = F.cross_entropy(final_logits, towards_labels)
 
-    (coef * toward_loss).backward()
+        total_loss = toward_loss * coef
+
+        if probes is not None:
+            total_probe_loss = 0
+            for probe_layer, probe in probes.items():
+                probe = probe.cuda()
+                layer_acts = model_output.hidden_states[probe_layer + 1]
+                probe_outs = probe(layer_acts)[towards_labels_mask]
+                probe_loss = torch.sigmoid(probe_outs).mean()
+                total_probe_loss += probe_loss
+
+            total_loss += total_probe_loss * probe_loss_coef
+
+    total_loss.backward()
     losses["toward"] = toward_loss.item()
     losses["total"] = toward_loss.item()
 
@@ -303,6 +321,8 @@ def train_projected_gradient_descent(
     epsilon,
     learning_rate,
     pgd_iterations,
+    probes=None,
+    probe_loss_coef=1.0,
     towards_loss_coef=1.0,
     l2_regularization=0,
     return_loss_over_time=False,
@@ -384,7 +404,9 @@ def train_projected_gradient_descent(
             towards_tokens=adv_tokens,
             towards_labels_mask=target_mask,
             coef=towards_loss_coef,
+            probe_loss_coef=probe_loss_coef,
             losses=losses,
+            probes=probes,
         )
 
         # Add L2 penalty if specified

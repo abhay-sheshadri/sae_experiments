@@ -1,4 +1,5 @@
 from .probing import *
+from .attacks import *
 
 
 def initialize_lora_adapter(encoder, layers, lora_params):
@@ -40,6 +41,7 @@ def train_online_probe(
     create_probe_fn,
     layers,
     lora_params={},
+    adversarial_training=False,
     probe_lr=2e-3,
     adapter_lr=8e-5,
     kl_penalty=0.1,
@@ -127,11 +129,27 @@ def train_online_probe(
             pos_batch_attention_mask = positive_attention_mask[batch_perm].to(device)
             neg_batch_input_ids = negative_input_ids[batch_perm].to(device)
             neg_batch_attention_mask = negative_attention_mask[batch_perm].to(device)
-            pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device)
-            neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device)
+            pos_batch_zero_mask = zero_positive_mask[batch_perm].to(device).bool()
+            neg_batch_zero_mask = zero_negative_mask[batch_perm].to(device).bool()
 
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
+
+                if adversarial_training:
+                    losses, wrappers = train_projected_gradient_descent(
+                        adv_tokens=pos_batch_input_ids,
+                        prompt_mask=~pos_batch_zero_mask,
+                        target_mask=pos_batch_zero_mask,
+                        model=lora_model,
+                        model_layers_module="base_model.model.model.layers",
+                        layer=["embedding"],
+                        epsilon=6.0,
+                        learning_rate=1e-3,
+                        pgd_iterations=64,
+                        probes=probes,
+                        adversary_type="pgd",
+                    )
+
                 pos_output = lora_model(
                     input_ids=pos_batch_input_ids,
                     attention_mask=pos_batch_attention_mask,
@@ -148,10 +166,13 @@ def train_online_probe(
                     pos_probe_output = probe(pos_acts[layer]).view(-1)
                     pos_targets = torch.ones_like(pos_probe_output)
                     pos_layer_loss = criterion(
-                        pos_probe_output[pos_batch_zero_mask.view(-1).bool()],
-                        pos_targets[pos_batch_zero_mask.view(-1).bool()],
+                        pos_probe_output[pos_batch_zero_mask.view(-1)],
+                        pos_targets[pos_batch_zero_mask.view(-1)],
                     )
                     pos_loss += pos_layer_loss
+
+            if adversarial_training:
+                clear_hooks(lora_model)
 
             # Forward pass on negative examples
             with torch.autocast(device_type=device):

@@ -292,23 +292,23 @@ def compute_adversarial_loss(
         final_logits = logits[:, :-1][towards_labels_mask[:, 1:]]
         towards_labels = towards_tokens[:, 1:][towards_labels_mask[:, 1:]]
         toward_loss = F.cross_entropy(final_logits, towards_labels)
-
+        losses["toward"] = toward_loss.item()
         total_loss = toward_loss * coef
-
+        
         if probes is not None:
             total_probe_loss = 0
             for probe_layer, probe in probes.items():
                 probe = probe.cuda()
                 layer_acts = model_output.hidden_states[probe_layer + 1]
                 probe_outs = probe(layer_acts)[towards_labels_mask]
-                probe_loss = torch.sigmoid(probe_outs).mean()
+                labels = torch.zeros_like(probe_outs)  # Adjust this if your labels are different
+                probe_loss = F.binary_cross_entropy_with_logits(probe_outs, labels)
                 total_probe_loss += probe_loss
-
             total_loss += total_probe_loss * probe_loss_coef
+            losses["probe"] = total_probe_loss.item()
 
     total_loss.backward()
-    losses["toward"] = toward_loss.item()
-    losses["total"] = toward_loss.item()
+    losses["total"] = total_loss.item()
 
 
 def train_projected_gradient_descent(
@@ -327,7 +327,7 @@ def train_projected_gradient_descent(
     l2_regularization=0,
     return_loss_over_time=False,
     device="cuda",
-    clip_grad=None,
+    clip_grad=1,
     add_completions_pgd=False,
     adversary_type="pgd",
 ):

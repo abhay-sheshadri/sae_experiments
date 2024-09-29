@@ -567,3 +567,19 @@ def convert_float16(obj):
         return obj.float()
     else:
         return obj
+
+
+def convert_seconds_to_time_str(seconds):
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{minutes}m {seconds}s"
+    else:
+        hours = seconds // 3600
+        seconds = seconds % 3600
+        minutes = seconds // 60
+        seconds = seconds % 60
+        return f"{hours}h {minutes}m {seconds}s"

@@ -65,10 +65,13 @@ def _generate_highlighted_html(tokens, acts, use_orange_highlight=True):
     for token, act in zip(tokens, acts):
 
         # Format the activation value for display
-        act_display = f"{act:.2f}"  # Display activation with 2 decimal places
+        if act is None:
+            act_display = ""
+        else:
+            act_display = f"{act:.2f}"  # Display activation with 2 decimal places
 
         # Highlight token if act != 0
-        if act != 0:
+        if act is not None and act != 0:
 
             # Normalize activation, max at 1
             factor = min(abs(act) / 10, 1)
@@ -607,9 +610,13 @@ def prompt_centric_view_generic(token_act_pairs, title="Generic Prompt-Centric V
     return _generate_prompt_centric_view(examples, title, get_tokens_and_acts, False)
 
 
-def prompt_centric_view_generic_dict(token_act_pairs_dict, title="Generic Prompt-Centric View"):
+def prompt_centric_view_generic_dict(
+    token_act_pairs_dict, title="Generic Prompt-Centric View"
+):
     # Display prompt-centric view for a list of annotated examples
     html_contents = []
     for split_name, token_act_pairs in token_act_pairs_dict.items():
-        html_contents.append((split_name, prompt_centric_view_generic(token_act_pairs, split_name)))
+        html_contents.append(
+            (split_name, prompt_centric_view_generic(token_act_pairs, split_name))
+        )
     return _light_mode(_combine_html_contents(*html_contents, title=title, nested=True))

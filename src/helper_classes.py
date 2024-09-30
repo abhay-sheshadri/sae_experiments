@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 import torch
-# from circuitsvis.tokens import colored_tokens
+from circuitsvis.tokens import colored_tokens
 from tqdm.auto import tqdm
 from transformer_lens import utils as tl_utils
 

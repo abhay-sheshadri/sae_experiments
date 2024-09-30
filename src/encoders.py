@@ -133,6 +133,8 @@ class SparseAutoencoder:
         max_length=1024,
         return_tokens=False,
         use_memmap=None,
+        only_return_layers=None,
+        only_return_on_tokens_between=None,
     ):
         # Ensure max_length doesn't exceed the model's maximum
         max_length = min(self.tokenizer.model_max_length, max_length)
@@ -149,6 +151,16 @@ class SparseAutoencoder:
         )
         input_ids = tokens["input_ids"]
         attention_mask = tokens["attention_mask"]
+
+        # Apply the only_return_on_tokens_between mask if provided
+        if only_return_on_tokens_between is not None:
+            only_return_mask = get_valid_token_mask(
+                input_ids, only_return_on_tokens_between
+            )
+            zero_positions_mask = attention_mask.clone()
+            zero_positions_mask[~only_return_mask] = 0
+        else:
+            zero_positions_mask = attention_mask
 
         # If batch_size is not specified, process all input at once
         if batch_size is None:
@@ -187,13 +199,16 @@ class SparseAutoencoder:
                 metadata["tokens_dtype"] = "int32"
 
             # Create memmaps for each layer with the correct shape
-            layer_memmaps = []
-            for layer in range(num_layers):
+            layer_memmaps = {}
+            layers_to_return = (
+                range(num_layers) if only_return_layers is None else only_return_layers
+            )
+            for layer in layers_to_return:
                 memmap_file = f"{use_memmap}_residual_act_layer_{layer}.dat"
                 memmap = np.memmap(
                     memmap_file, dtype="float16", mode="w+", shape=full_shape
                 )
-                layer_memmaps.append(memmap)
+                layer_memmaps[layer] = memmap
                 metadata["files"][f"layer_{layer}"] = os.path.basename(memmap_file)
 
             # Save metadata
@@ -201,12 +216,18 @@ class SparseAutoencoder:
             with open(metadata_file, "w") as f:
                 json.dump(metadata, f, indent=2)
         else:
-            # Pre-allocate the full tensor for all layers
-            all_residual_acts = [
-                torch.empty((input_ids.size(0), input_ids.size(1), self.model.config.hidden_size),
-                            dtype=torch.float16, device='cpu')
-                for _ in range(self.model.config.num_hidden_layers)
-            ]
+            # Pre-allocate the full tensor for required layers
+            layers_to_return = (
+                range(num_layers) if only_return_layers is None else only_return_layers
+            )
+            all_residual_acts = {
+                layer: torch.empty(
+                    (input_ids.size(0), input_ids.size(1), hidden_dim),
+                    dtype=torch.float16,
+                    device="cpu",
+                )
+                for layer in layers_to_return
+            }
 
         # Process input in batches
         for i in tqdm(range(0, input_ids.size(0), batch_size)):
@@ -215,28 +236,31 @@ class SparseAutoencoder:
             batch_attention_mask = attention_mask[i : i + batch_size].to(
                 self.model.device
             )
+            batch_zero_positions_mask = zero_positions_mask[i : i + batch_size].to(
+                self.model.device
+            ) # Masked attention mask for only_return_on_tokens_between
 
             # Get residual activations for the batch
-            batch_residual_acts = get_all_residual_acts(
-                self.model, batch_input_ids, batch_attention_mask, batch_size
+            batch_residual_acts = get_all_residual_acts_unbatched(
+                self.model, batch_input_ids, batch_attention_mask, only_return_layers
             )
 
-            # Apply attention mask to the activations
-            masked_batch_residual_acts = [
-                (act * batch_attention_mask.unsqueeze(-1).to(act.dtype)).cpu()
-                for act in batch_residual_acts
-            ]
+            # Apply attention mask to the activations and move to CPU
+            masked_batch_residual_acts = {
+                layer: (act * batch_zero_positions_mask.unsqueeze(-1).to(act.dtype))
+                .cpu()
+                .to(torch.float16)
+                for layer, act in batch_residual_acts.items()
+            }
 
             if use_memmap:
                 # Write the batch data to the memmaps
-                for layer, act in enumerate(masked_batch_residual_acts):
-                    layer_memmaps[layer][i : i + batch_size] = act.to(
-                        torch.float16
-                    ).numpy()
+                for layer, act in masked_batch_residual_acts.items():
+                    layer_memmaps[layer][i : i + batch_size] = act.numpy()
             else:
                 # Directly assign the batch results to the pre-allocated tensors
-                for layer, act in enumerate(masked_batch_residual_acts):
-                    all_residual_acts[layer][i : i + batch_size] = act.to(torch.float16)
+                for layer, act in masked_batch_residual_acts.items():
+                    all_residual_acts[layer][i : i + batch_size] = act
 
         # Return the residual activations
         if return_tokens:
@@ -551,15 +575,23 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         self.encoder = encoder
 
     def reconstruct(self, acts):
+        if self.encoder is None:
+            raise ValueError("This model does not have an SAE")
+        # Encode the acts in SAE space and decode back
         acts = self._fix_input_shape(acts)
         return self.encoder(acts).sae_out
 
     def encode(self, acts):
+        if self.encoder is None:
+            raise ValueError("This model does not have an SAE")
+        # Encode the acts in SAE space
         acts = self._fix_input_shape(acts)
         out = self.encoder.encode(acts)
         return out.top_indices, out.top_acts
 
     def get_codebook(self, hook_name):
+        if self.encoder is None:
+            raise ValueError("This model does not have an SAE")
         return self.encoder.W_dec
 
     @staticmethod
@@ -574,20 +606,23 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         model, tokenizer = load_hf_model_and_tokenizer(model_name)
 
         # Load SAE using Eleuther library
-        sae_name = (
-            "EleutherAI/sae-llama-3-8b-32x-v2"
-            if v2
-            else "EleutherAI/sae-llama-3-8b-32x"
-        )
-        sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
-        return EleutherSparseAutoencoder(
-            model=model,
-            tokenizer=tokenizer,
-            encoder=sae,
-            hook_name=f"model.layers.{layer}",  # The SAE reads in the output of this block
-            *args,
-            **kwargs,
-        )
+        if layer is None:
+            sae = None
+        else:
+            sae_name = (
+                "EleutherAI/sae-llama-3-8b-32x-v2"
+                if v2
+                else "EleutherAI/sae-llama-3-8b-32x"
+            )
+            sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+            return EleutherSparseAutoencoder(
+                model=model,
+                tokenizer=tokenizer,
+                encoder=sae,
+                hook_name=f"model.layers.{layer}",  # The SAE reads in the output of this block
+                *args,
+                **kwargs,
+            )
 
     @staticmethod
     def load_pythia_sae(layer, model_size="160m", deduped=True, *args, **kwargs):
@@ -606,12 +641,15 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         model, tokenizer = load_hf_model_and_tokenizer(model_name)
 
         # Load SAE using Eleuther library
-        sae_name = (
-            f"EleutherAI/sae-pythia-{model_size}-deduped-32k"
-            if deduped
-            else f"EleutherAI/sae-pythia-{model_size}-32k"
-        )
-        sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
+        if layer is None:
+            sae = None
+        else:
+            sae_name = (
+                f"EleutherAI/sae-pythia-{model_size}-deduped-32k"
+                if deduped
+                else f"EleutherAI/sae-pythia-{model_size}-32k"
+            )
+            sae = Sae.load_from_hub(sae_name, hookpoint=f"layers.{layer}", device="cuda")
         return EleutherSparseAutoencoder(
             model=model,
             tokenizer=tokenizer,
@@ -638,6 +676,8 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         self.encoder = encoder
 
     def reconstruct(self, acts):
+        if self.encoder is None:
+            raise ValueError("This model does not have an SAE")
         # Encode the acts in SAE space
         acts = self._fix_input_shape(acts)
         sae_latents = acts @ self.encoder.W_enc + self.encoder.b_enc
@@ -645,6 +685,8 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         return sae_latents @ self.encoder.W_dec + self.encoder.b_dec
 
     def encode(self, acts):
+        if self.encoder is None:
+            raise ValueError("This model does not have an SAE")
         # Encode the acts in SAE space
         acts = self._fix_input_shape(acts)
         sae_latents = acts @ self.encoder.W_enc + self.encoder.b_enc
@@ -687,14 +729,17 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         )
 
         # Load sae weights into module
-        sae = (
-            GenericSaeModule(d_model=model.config.hidden_size, d_sae=width)
-            .cuda()
-            .to(torch.bfloat16)
-        )
-        sae.load_state_dict(
-            DeepmindSparseAutoencoder.load_npz_weights(sae_path, torch.bfloat16, "cuda")
-        )
+        if layer is None:
+            sae = None
+        else:
+            sae = (
+                GenericSaeModule(d_model=model.config.hidden_size, d_sae=width)
+                .cuda()
+                .to(torch.bfloat16)
+            )
+            sae.load_state_dict(
+                DeepmindSparseAutoencoder.load_npz_weights(sae_path, torch.bfloat16, "cuda")
+            )
         return DeepmindSparseAutoencoder(
             model=model,
             tokenizer=tokenizer,

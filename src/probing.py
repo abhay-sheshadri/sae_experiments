@@ -188,6 +188,7 @@ def train_layer(
     n_grad_accum,
     device,
     using_memmap,
+    clip_grad_norm=1.0,
 ):
     # Train a probe on the activations at a specific layer
     probe.to(device)
@@ -242,6 +243,10 @@ def train_layer(
             # Backward pass and optimization step
             loss.backward()
             epoch_loss += loss.item() * n_grad_accum
+
+            if clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(probe.parameters(), clip_grad_norm)
+
             if (i // batch_size + 1) % n_grad_accum == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -277,7 +282,7 @@ def train_probe(
     negative_examples,
     create_probe_fn,
     layers,
-    use_parallelism=True,
+    use_parallelism=False,
     lr=1e-3,
     max_length=1024,
     n_epochs=10,
@@ -555,6 +560,10 @@ def train_online_probe(
     device="cuda",
     pretrained_probes=None,
     only_return_on_tokens_between=None,
+    epsilon=6.0,
+    adversary_lr=5e-4,
+    pgd_iterations=32,
+    clip_grad_norm=1.0,
     **kwargs,
 ):
     assert n_grad_accum == 0 or n_steps % n_grad_accum == 0
@@ -641,32 +650,34 @@ def train_online_probe(
 
             # Forward pass on positive examples
             with torch.autocast(device_type=device):
-                
+
                 # Clear hooks from last step if adversarial training is used
                 if adversarial_training:
                     clear_hooks(lora_model)
 
                 if adversarial_training:
-                    losses, wrappers = train_projected_gradient_descent(
+                    losses, wrappers = train_attack(
                         adv_tokens=pos_batch_input_ids,
                         prompt_mask=~pos_batch_zero_mask,
                         target_mask=pos_batch_zero_mask,
                         model=lora_model,
                         model_layers_module="base_model.model.model.layers",
                         layer=["embedding"],
-                        epsilon=6.0,
-                        learning_rate=5e-4,
-                        pgd_iterations=32,
+                        epsilon=epsilon,
+                        learning_rate=adversary_lr,
+                        pgd_iterations=pgd_iterations,
                         probes=probes,
                         adversary_type="pgd",
                     )
                     pgd_toward_loss = losses["toward"]
                     pgd_probe_loss = losses["probe"]
                 else:
-                    pgd_toward_loss = 0  # Set to 0 when adversarial training is not used
+                    pgd_toward_loss = (
+                        0  # Set to 0 when adversarial training is not used
+                    )
                     pgd_probe_loss = 0
                     wrappers = []
-                
+
                 for wrapper in wrappers:
                     wrapper.enabled = True
 
@@ -736,10 +747,19 @@ def train_online_probe(
             neg_loss.backward(retain_graph=True)
             (kl_loss / (kl_loss.detach() + 1e-8) * kl_penalty).backward()
 
+            if clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(lora_model.parameters(), clip_grad_norm)
+                all_probe_params = [
+                    param for probe in probes.values() for param in probe.parameters()
+                ]
+                torch.nn.utils.clip_grad_norm_(all_probe_params, clip_grad_norm)
+
             # Accumulate losses
             accumulated_probe_loss += pos_loss.item() + neg_loss.item()
             accumulated_kl_loss += kl_loss.item()
-            accumulated_toward_pgd_loss += pgd_toward_loss if adversarial_training else 0
+            accumulated_toward_pgd_loss += (
+                pgd_toward_loss if adversarial_training else 0
+            )
             accumulated_probe_pgd_loss += pgd_probe_loss if adversarial_training else 0
             steps_since_last_log += 1
 

@@ -1,11 +1,12 @@
 import copy
-from typing import Any, Callable, Dict, List, Tuple, Union
 
 import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm.auto import tqdm
 
 
 # Custom hook for non-transformer-lens models
@@ -85,9 +86,9 @@ def clear_hooks(model):
 
 # Main function for adding adversaries
 def add_hooks(
-    model: nn.Module,
-    create_adversary: Callable[[Tuple[str, str]], Any],
-    adversary_locations: List[Tuple[str, str]],
+    model,
+    create_adversary,
+    adversary_locations,
 ):
     if len(adversary_locations) == 0:
         raise ValueError("No hook points provided")
@@ -105,7 +106,7 @@ def add_hooks(
 
 # Deepspeed version of add_hooks
 class AdversaryWrapper(nn.Module):
-    def __init__(self, module: nn.Module, adversary: Any):
+    def __init__(self, module: nn.Module, adversary):
         super().__init__()
         self.module = module
         self.adversary = adversary
@@ -117,8 +118,8 @@ class AdversaryWrapper(nn.Module):
 
 def deepspeed_add_hooks(
     model: nn.Module,
-    create_adversary: Callable[[Tuple[str, str]], Any],
-    adversary_locations: List[Tuple[str, str]],
+    create_adversary,
+    adversary_locations,
 ):
     if len(adversary_locations) == 0:
         raise ValueError("No hook points provided")
@@ -186,10 +187,12 @@ class SoftPromptAdversary(nn.Module):
         self.device = device
         self.epsilon = epsilon
         self.length = length
-        self.sp_keys = nn.Parameter(torch.randn(batch_size, length, dim, device=device))
+        self.sp_keys = nn.Parameter(torch.zeros(batch_size, length, dim, device=device))
         self.sp_values = nn.Parameter(
-            torch.randn(batch_size, length, dim, device=device)
+            torch.zeros(batch_size, length, dim, device=device)
         )
+        torch.nn.init.kaiming_uniform_(self.sp_keys)
+        torch.nn.init.kaiming_uniform_(self.sp_values)
         self.clip_attack()
 
         # Add attention layers with single head and no bias
@@ -236,6 +239,7 @@ class GDAdversary(nn.Module):
                     attack_mask.shape[0], attack_mask.shape[1], dim, device=self.device
                 )
             )
+        torch.nn.init.kaiming_uniform_(self.attack)
         self.clip_attack()
         self.attack_mask = attack_mask
 
@@ -270,6 +274,64 @@ class GDAdversary(nn.Module):
             self.attack.div_(scale)
 
 
+class UniversalVectorAdversary(nn.Module):
+
+    def __init__(self, dim, epsilon, device):
+        super().__init__()
+        self.dim = dim
+        self.device = device
+        self.epsilon = epsilon
+        self.vector = torch.nn.Parameter(torch.zeros(1, dim, device=device))
+        torch.nn.init.kaiming_uniform_(self.vector)
+
+    def forward(self, x):
+        return x + self.vector.unsqueeze(0)
+
+    def clip_attack(self):
+        with torch.no_grad():
+            norms = torch.norm(self.vector, dim=-1, keepdim=True)
+            scale = torch.clamp(norms / self.epsilon, min=1)
+            self.vector.div_(scale)
+
+
+class UniversalSoftPromptAdversary(nn.Module):
+
+    def __init__(self, dim, length, epsilon, device):
+        super().__init__()
+        self.dim = dim
+        self.device = device
+        self.epsilon = epsilon
+        self.length = length
+        self.sp_keys = nn.Parameter(torch.zeros(length, dim, device=device))
+        self.sp_values = nn.Parameter(torch.zeros(length, dim, device=device))
+        torch.nn.init.kaiming_uniform_(self.sp_keys)
+        torch.nn.init.kaiming_uniform_(self.sp_values)
+        self.clip_attack()
+
+        # Add attention layers with single head and no bias
+        self.query_proj = nn.Linear(dim, dim, bias=False).to(self.device)
+        self.attention = nn.MultiheadAttention(
+            dim, num_heads=1, batch_first=True, bias=False
+        ).to(self.device)
+
+    def forward(self, x):
+        query = self.query_proj(x)
+        batched_sp_keys = einops.repeat(self.sp_keys, "l d -> b l d", b=x.shape[0])
+        batched_sp_values = einops.repeat(self.sp_values, "l d -> b l d", b=x.shape[0])
+        attn_output, _ = self.attention(query, batched_sp_keys, batched_sp_values)
+        return x + attn_output
+
+    def clip_attack(self):
+        with torch.no_grad():
+            norms = torch.norm(self.sp_keys, dim=-1, keepdim=True)
+            scale = torch.clamp(norms / self.epsilon, min=1)
+            self.sp_keys.data.div_(scale)
+
+            norms = torch.norm(self.sp_values, dim=-1, keepdim=True)
+            scale = torch.clamp(norms / self.epsilon, min=1)
+            self.sp_values.data.div_(scale)
+
+
 def zero_nan_grads(model):
     flag = False
     for name, p in model.named_parameters():
@@ -294,14 +356,16 @@ def compute_adversarial_loss(
         toward_loss = F.cross_entropy(final_logits, towards_labels)
         losses["toward"] = toward_loss.item()
         total_loss = toward_loss * coef
-        
+
         if probes is not None:
             total_probe_loss = 0
             for probe_layer, probe in probes.items():
                 probe = probe.cuda()
                 layer_acts = model_output.hidden_states[probe_layer + 1]
                 probe_outs = probe(layer_acts)[towards_labels_mask]
-                labels = torch.zeros_like(probe_outs)  # Adjust this if your labels are different
+                labels = torch.zeros_like(
+                    probe_outs
+                )  # Adjust this if your labels are different
                 probe_loss = F.binary_cross_entropy_with_logits(probe_outs, labels)
                 total_probe_loss += probe_loss
             total_loss += total_probe_loss * probe_loss_coef
@@ -311,7 +375,7 @@ def compute_adversarial_loss(
     losses["total"] = total_loss.item()
 
 
-def train_projected_gradient_descent(
+def train_attack(
     adv_tokens,
     prompt_mask,
     target_mask,
@@ -330,6 +394,7 @@ def train_projected_gradient_descent(
     clip_grad=1,
     add_completions_pgd=False,
     adversary_type="pgd",
+    verbose=False,
 ):
     # Clear and initialize the adversary
     clear_hooks(model)
@@ -368,9 +433,11 @@ def train_projected_gradient_descent(
             dim=model.config.hidden_size,
             batch_size=adv_tokens.shape[0],
             epsilon=epsilon,
-            length=10,
+            length=15,
             device=device,
         )
+    else:
+        raise ValueError(f"Adversary type {adversary_type} not recognized")
 
     adversary_locations = [
         (f"{model_layers_module}", f"{layer_i}")
@@ -395,7 +462,7 @@ def train_projected_gradient_descent(
     losses = {}
 
     # Optimize adversary to elicit attack labels
-    for _ in range(pgd_iterations):
+    for _ in tqdm(range(pgd_iterations), disable=not verbose):
         adv_optim.zero_grad()
 
         # Compute the adversary loss
@@ -429,5 +496,143 @@ def train_projected_gradient_descent(
 
         if return_loss_over_time:
             loss_over_time.append(copy.deepcopy(losses))
+
+    return (loss_over_time, wrappers) if return_loss_over_time else (losses, wrappers)
+
+
+def train_universal_attack(
+    adv_tokens,
+    target_mask,
+    model,
+    model_layers_module,
+    layer,
+    epsilon,
+    learning_rate,
+    n_steps,
+    batch_size,
+    gradient_accumulation_steps=1,
+    probes=None,
+    probe_loss_coef=1.0,
+    towards_loss_coef=1.0,
+    l2_regularization=0,
+    return_loss_over_time=False,
+    device="cuda",
+    clip_grad=1,
+    adversary_type="soft_prompt",
+    verbose=False,
+):
+    # Clear and initialize the adversary
+    clear_hooks(model)
+    if isinstance(layer, int):
+        layer = [layer]
+
+    if adversary_type == "low_rank":
+        create_adversary = lambda x: LowRankAdversary(
+            dim=model.config.hidden_size,
+            rank=16,
+            device=device,
+            zero_init=True,
+        )
+    elif adversary_type == "vector":
+        create_adversary = lambda x: UniversalVectorAdversary(
+            dim=model.config.hidden_size,
+            epsilon=epsilon,
+            device=device,
+        )
+    elif adversary_type == "soft_prompt":
+        create_adversary = lambda x: UniversalSoftPromptAdversary(
+            dim=model.config.hidden_size,
+            epsilon=epsilon,
+            length=15,
+            device=device,
+        )
+    else:
+        raise ValueError(f"Adversary type {adversary_type} not recognized")
+
+    adversary_locations = [
+        (f"{model_layers_module}", f"{layer_i}")
+        for layer_i in layer
+        if isinstance(layer_i, int)
+    ]
+    if "embedding" in layer:
+        adversary_locations.append(
+            (model_layers_module.replace(".layers", ""), "embed_tokens")
+        )
+
+    adversaries, wrappers = add_hooks(
+        model,
+        create_adversary=create_adversary,
+        adversary_locations=adversary_locations,
+    )
+    params = [p for adv in adversaries for p in adv.parameters()]
+
+    # Define optimization utils
+    adv_optim = torch.optim.AdamW(params, lr=learning_rate)
+
+    # Ensure n_steps is divisible by gradient_accumulation_steps
+    assert (
+        n_steps % gradient_accumulation_steps == 0
+    ), "n_steps must be divisible by gradient_accumulation_steps"
+
+    # Construct a dataloader
+    dataset = TensorDataset(adv_tokens, target_mask)
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, drop_last=False
+    )
+    data_iterator = iter(dataloader)
+
+    # Optimize adversary for n_steps forward passes
+    losses = None
+    loss_over_time = [] if return_loss_over_time else None
+
+    for step in tqdm(range(n_steps), disable=not verbose):
+        try:
+            batch_tokens, batch_target_mask = next(data_iterator)
+        except StopIteration:
+            data_iterator = iter(dataloader)
+            batch_tokens, batch_target_mask = next(data_iterator)
+
+        batch_tokens = batch_tokens.to(device)
+        batch_target_mask = batch_target_mask.to(device)
+
+        # Compute the adversary loss
+        losses = {}
+        compute_adversarial_loss(
+            model=model,
+            towards_tokens=batch_tokens,
+            towards_labels_mask=batch_target_mask,
+            coef=towards_loss_coef,
+            probe_loss_coef=probe_loss_coef,
+            losses=losses,
+            probes=probes,
+        )
+
+        # Add L2 penalty if specified
+        if l2_regularization:
+            reg_loss = sum(torch.norm(adv.attack) for adv in adversaries)
+            num_el = sum(torch.numel(adv.attack) for adv in adversaries)
+            l2_loss = (
+                l2_regularization * reg_loss / np.sqrt(num_el)
+            ) / gradient_accumulation_steps
+            l2_loss.backward()
+            losses["l2_norm"] = reg_loss.item() / np.sqrt(num_el)
+
+        # Perform optimization step if gradient accumulation is complete
+        if (step + 1) % gradient_accumulation_steps == 0:
+            for adv in adversaries:
+                zero_nan_grads(adv)
+
+            if clip_grad is not None:
+                torch.nn.utils.clip_grad_norm_(params, clip_grad)
+
+            adv_optim.step()
+            adv_optim.zero_grad()
+
+            for adv in adversaries:
+                adv.clip_attack()
+
+            # Record the average loss over the accumulation steps
+            if return_loss_over_time:
+                loss_over_time.append(copy.deepcopy(losses))
 
     return (loss_over_time, wrappers) if return_loss_over_time else (losses, wrappers)

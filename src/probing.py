@@ -10,7 +10,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from accelerate import find_executable_batch_size
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from sklearn.metrics import f1_score
 from torch import nn
 from tqdm.auto import tqdm
@@ -549,8 +549,8 @@ def train_online_probe(
     layers,
     lora_params={},
     adversarial_training=False,
-    probe_lr=2e-3,
-    adapter_lr=8e-5,
+    probe_lr=1e-3,
+    adapter_lr=5e-5,
     kl_penalty=0.1,
     max_length=1024,
     n_steps=1000,
@@ -923,8 +923,24 @@ def get_probe_scores(
 
 
 def get_annotated_dataset(
-    probes, encoder, dataset, splits, batch_size, max_length, **kwargs
+    probes,
+    encoder,
+    dataset,
+    splits,
+    batch_size,
+    max_length,
+    model_adapter_path=None,
+    **kwargs,
 ):
+    # Load model adapter if provided
+    if model_adapter_path is not None:
+        print("Loading model adapter...")
+        assert not isinstance(
+            encoder.model, PeftModel
+        )  # model should not be a PeftModel at this point
+        encoder.model = PeftModel.from_pretrained(encoder.model, model_adapter_path)
+        # encoder.model = encoder.model.merge_and_unload()
+
     # Get scores
     scores_dict = {}
     dataset_splits = {
@@ -950,6 +966,10 @@ def get_annotated_dataset(
                 **kwargs,
             )
         scores_dict[split] = paired_scores
+
+    if model_adapter_path is not None:
+        # remove the lora adapter
+        encoder.model = encoder.model.base_model
 
     return convert_float16(scores_dict)
 
@@ -1028,8 +1048,8 @@ def aggregate_across_tokens(all_split_scores, cross_token_aggregation):
             example_scalar = aggregation_func(example_scores)
             new_split_scores.append(example_scalar)
 
-            min_score = min(min_score, min(example_scores))
-            max_score = max(max_score, max(example_scores))
+            min_score = min(min_score, example_scalar)
+            max_score = max(max_score, example_scalar)
 
         aggregated_scores[split] = new_split_scores
 
@@ -1087,7 +1107,7 @@ def get_threshold_at_fpr(
     return final_threshold
 
 
-def create_box_plot(
+def create_scores_plot(
     aggregated_scores,
     best_threshold,
     best_f1,
@@ -1095,26 +1115,31 @@ def create_box_plot(
     false_positive_rate,
     allowed_labels,
 ):
-    # Create a box plot of the aggregated scores
     plt.figure(figsize=(12, 6))
 
     data = [aggregated_scores[label] for label in allowed_labels]
     labels = allowed_labels
     colors = sns.color_palette("husl", n_colors=len(aggregated_scores))
 
-    bp = plt.boxplot(
-        data,
-        labels=labels,
-        patch_artist=True,
-        vert=False,
-        flierprops=dict(marker="x", markeredgecolor="black", markersize=5),
-        medianprops=dict(color="black"),
-        widths=0.5,
+    # Create violin plot
+    parts = plt.violinplot(
+        data, vert=False, showmeans=False, showextrema=False, showmedians=False
     )
 
-    for patch, color in zip(bp["boxes"], colors):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.7)
+    # Customize violin plot colors and add quartile lines
+    for i, pc in enumerate(parts["bodies"]):
+        pc.set_facecolor(colors[i])
+        pc.set_edgecolor("black")
+        pc.set_alpha(0.7)
+
+        # Calculate quartiles
+        quartile1, median, quartile3 = np.percentile(data[i], [25, 50, 75])
+
+        # Add quartile lines
+        plt.hlines(
+            i + 1, quartile1, quartile3, color="k", linestyle="-", lw=5, alpha=0.7
+        )
+        plt.vlines(median, i + 0.95, i + 1.05, color="white", linestyle="-", lw=2)
 
     plt.axvline(
         best_threshold,
@@ -1124,8 +1149,8 @@ def create_box_plot(
         label=f"Best Threshold: {best_threshold:.2f}",
     )
 
-    plt.title(f"{title}\nBest F1 Score: {best_f1:.2f}", fontsize=14)
-    plt.xlabel("Score (Vickrey Auction)", fontsize=12)
+    plt.title(f"{title}\nOverall F1: {best_f1:.2f}", fontsize=14)
+    plt.xlabel("Aggregated Score", fontsize=12)
     plt.yticks(range(1, len(labels) + 1), labels, fontsize=10)
 
     plt.gca().invert_yaxis()
@@ -1139,7 +1164,9 @@ def create_box_plot(
             linestyle="--",
             linewidth=2,
             label=f"Threshold at {false_positive_rate*100:.2f}% FPR",
-        )
+        ),
+        plt.Line2D([0], [0], color="k", linestyle="-", lw=5, alpha=0.7, label="IQR"),
+        plt.Line2D([0], [0], color="white", linestyle="-", lw=2, label="Median"),
     ]
     legend_elements.extend(
         [
@@ -1159,6 +1186,30 @@ def create_box_plot(
 
     plt.tight_layout()
     plt.show()
+
+
+def get_per_split_scores(
+    aggregated_scores, best_threshold, positive_splits, negative_splits, heldout_splits
+):
+    per_split_scores = {}
+
+    for split in positive_splits + negative_splits + heldout_splits:
+        if split not in aggregated_scores:
+            print(f"Warning: Split '{split}' not found in aggregated_scores.")
+            continue
+
+        scores = aggregated_scores[split]
+        total_samples = len(scores)
+
+        if split in positive_splits:
+            correct_predictions = sum(score >= best_threshold for score in scores)
+        else:  # negative_splits and heldout_splits
+            correct_predictions = sum(score < best_threshold for score in scores)
+
+        accuracy = correct_predictions / total_samples if total_samples > 0 else 0
+        per_split_scores[split] = accuracy
+
+    return per_split_scores
 
 
 def generate_score_plots(
@@ -1191,7 +1242,7 @@ def generate_score_plots(
         best_threshold, aggregated_scores, negative_splits, positive_splits
     )
 
-    create_box_plot(
+    create_scores_plot(
         aggregated_scores,
         best_threshold,
         best_f1,
@@ -1200,9 +1251,18 @@ def generate_score_plots(
         positive_splits + negative_splits + heldout_splits,
     )
 
+    per_split_scores = get_per_split_scores(
+        aggregated_scores,
+        best_threshold,
+        positive_splits,
+        negative_splits,
+        heldout_splits,
+    )
+
     return (
         list(aggregated_scores.values()),
         list(aggregated_scores.keys()),
         best_threshold,
         best_f1,
+        per_split_scores,
     )

@@ -583,3 +583,32 @@ def convert_seconds_to_time_str(seconds):
         minutes = seconds // 60
         seconds = seconds % 60
         return f"{hours}h {minutes}m {seconds}s"
+
+
+def process_data(prompts, targets, tokenizer, batch_size=None):
+    tokenized_prompts = [
+        tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
+    ]
+    tokenized_targets = [
+        tokenizer.encode(target, add_special_tokens=False) for target in targets
+    ]
+
+    if batch_size is None:
+        batch_size = len(prompts)
+
+    max_length = max(
+        len(tokenized_prompts[i] + tokenized_targets[i]) for i in range(batch_size)
+    )
+    print(max_length)
+    adv_tokens = torch.zeros((batch_size, max_length), dtype=torch.long)
+    adv_tokens.fill_(tokenizer.pad_token_id)
+    prompt_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
+    target_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
+
+    for i in range(batch_size):
+        combined = tokenized_prompts[i] + tokenized_targets[i]
+        adv_tokens[i, : len(combined)] = torch.tensor(combined)
+        prompt_mask[i, : len(tokenized_prompts[i])] = True
+        target_mask[i, len(tokenized_prompts[i]) : len(combined)] = True
+
+    return adv_tokens, prompt_mask, target_mask

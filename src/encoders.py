@@ -569,8 +569,8 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
             model=model,
             tokenizer=tokenizer,
             hook_name=hook_name,
-            n_features=encoder.encoder.out_features,
-            max_k=encoder.cfg.k,
+            n_features=encoder.encoder.out_features if encoder is not None else None,
+            max_k=encoder.cfg.k if encoder is not None else None,
         )
         self.encoder = encoder
 
@@ -617,14 +617,14 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
             sae = Sae.load_from_hub(
                 sae_name, hookpoint=f"layers.{layer}", device="cuda"
             )
-            return EleutherSparseAutoencoder(
-                model=model,
-                tokenizer=tokenizer,
-                encoder=sae,
-                hook_name=f"model.layers.{layer}",  # The SAE reads in the output of this block
-                *args,
-                **kwargs,
-            )
+        return EleutherSparseAutoencoder(
+            model=model,
+            tokenizer=tokenizer,
+            encoder=sae,
+            hook_name=f"model.layers.{layer}",  # The SAE reads in the output of this block
+            *args,
+            **kwargs,
+        )
 
     @staticmethod
     def load_pythia_sae(layer, model_size="160m", deduped=True, *args, **kwargs):

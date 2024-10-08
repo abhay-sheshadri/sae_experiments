@@ -38,23 +38,29 @@ parser.add_argument("--pgd_iterations", type=int, default=16,
                     help="Number of PGD iterations to use (0 means no PGD)")
 parser.add_argument("--pgd_layers", type=str, default=None,
                     help="Layers to apply PGD to, comma separated (can include embedding)")
-
+parser.add_argument("--num_steps", type=int, default=100,
+                    help="Number of steps to train")
+parser.add_argument("--epsilon", type=float, default=1.0,
+                    help="Epsilon for PGD")
+parser.add_argument("--eval_pretrained_probes", action="store_true",
+                    help="Whether to evaluate pretrained probes")
 args = parser.parse_args()
 model_name_or_path = args.model_name_or_path
 model_type = args.model_type
 probe_type = args.probe_type
 use_sft = args.use_sft
-save_name = f"lora_train_{model_type}_{probe_type}_use_sft{use_sft}"
+num_steps = args.num_steps
+save_name = f"lora_train_{model_type}_{probe_type}_use_sft{use_sft}_num_steps{num_steps}"
 
 pgd_iterations = args.pgd_iterations
 attack_seq = args.attack_seq
 adversary_loss = args.adversary_loss
-
+epsilon = args.epsilon
 if pgd_iterations > 0:
-    pgd_layers = args.pgd_layers
-    save_name += f"_seq{attack_seq}_adv{adversary_loss}_pgd{pgd_layers}"
+    pgd_layers = args.pgd_layers.replace(",", "_")
+    save_name += f"_seq{attack_seq}_adv{adversary_loss}_pgd{pgd_layers}_eps{epsilon}"
 
-pgd_layers_temp = pgd_layers.split(",")
+pgd_layers_temp = args.pgd_layers.split(",")
 pgd_layers = []
 for layer_i in pgd_layers_temp:
     if layer_i == "embedding":
@@ -62,7 +68,7 @@ for layer_i in pgd_layers_temp:
     else:
         pgd_layers.append(int(layer_i))
 
-print(f"{model_name_or_path=}, {model_type=}, {probe_type=}, {use_sft=}, {pgd_iterations=}, {attack_seq=}, {adversary_loss=}, {pgd_layers=}, {save_name=}")
+print(f"{model_name_or_path=}, {model_type=}, {probe_type=}, {use_sft=}, {pgd_iterations=}, {attack_seq=}, {adversary_loss=}, {pgd_layers=}, {epsilon=}, {num_steps=}, {save_name=}")
 
 # model_name_or_path = "meta-llama/Mezta-Llama-3-8B-Instruct" 
 # model_name_or_path = "/data/phillip_guo/circuit-breakers/harmfulness_probe/llama_lora_trained_full_kl"
@@ -1248,15 +1254,15 @@ pgd_trainer = ProjectedGradProbeLAT(
     sft_dataloader=sft_dataloader,  # dataloader for supervised finetuning
     # adv_loss_coefs={"towards": 1, "away": 0},
     adv_loss_coefs={"towards": 1, "away": 0},
-    def_loss_coefs={"benign": 1, "harmful": 1, "sft": 1},  # model's loss coefs
-    pgd_layers=[8, 12, 16],  # what layers to attack
+    def_loss_coefs={"benign": 1, "harmful": 1, "sft": 1 if use_sft else 0},  # model's loss coefs
+    pgd_layers=pgd_layers,  # what layers to attack
     model_layers=layers_to_transform,  # what layers to train
-    epsilon=1.5,  # attack l2 constraint
+    epsilon=epsilon,  # attack l2 constraint
     outer_learning_rate=1e-5,  # model lr
     inner_learning_rate=5e-2,  # attacker lr
-    pgd_iterations_per_step=16,  # how many steps of projected gradient descent to do
+    pgd_iterations_per_step=pgd_iterations,  # how many steps of projected gradient descent to do
     model_iterations_per_step=4,  # how many times to train on each step
-    num_steps=150,  # number of epochs
+    num_steps=num_steps,  # number of epochs
     max_batch_per_acc=2,  # max size of a minibatch
     model_layers_module="base_model.model.model.layers",  # where the model layers are
     reinitialize_dev_optim=True,
@@ -1303,6 +1309,12 @@ api.upload_folder(
 )
 
 # %%
+if args.eval_pretrained_probes:
+    print("Evaluating pretrained probes")
+    from eval_harmful_probes import *
+    all_prompts = load_data(model_type=model_type, tokenizer=tokenizer, eval_only=True)
+    print(all_prompts.keys())
+    all_caches, cache_ranges = get_acts_and_ranges(model=model, tokenizer=tokenizer, cache_layers=cache_layers, all_prompts=all_prompts, batch_size=12)
 
-
+    eval_pretrained_probe(probe_dict, caches=all_caches, non_mechanistic_layers=cache_layers, cache_type="output", cache_ranges=cache_ranges, save_dir=f"{save_name}/figures")
 

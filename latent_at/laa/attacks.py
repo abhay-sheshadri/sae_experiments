@@ -56,11 +56,18 @@ class GDAdversary(torch.nn.Module):
         self.clip_attack()
         self.attack_mask = attack_mask
     
+    # def forward(self, x):
+    #     print(f"{x.shape=}, {self.attack_mask.shape=}, {self.attack.shape=}")
+    #     expanded_mask = self.attack_mask.unsqueeze(-1).expand_as(x)
+        
+    #     perturbed_acts = x[self.attack_mask] + self.attack[self.attack_mask]
+    #     x[self.attack_mask[:, :x.shape[1]]] = perturbed_acts.to(x.dtype)
+    #     return x
+    
     def forward(self, x):
         # print(f"{x.shape=}, {self.attack_mask.shape=}, {self.attack.shape=}")
-        perturbed_acts = x[self.attack_mask[:, :x.shape[1]]] + self.attack[self.attack_mask[:, :x.shape[1]]]
-        x[self.attack_mask[:, :x.shape[1]]] = perturbed_acts.to(x.dtype)
-        return x
+        perturbed_acts = x + self.attack * self.attack_mask.unsqueeze(-1)
+        return perturbed_acts
     
     def clip_attack(self):
         with torch.no_grad():

@@ -8,8 +8,9 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBSCURATION_LOSS_WEIGHT = 0.0
-ACTIVATION_MATCHING_LAYERS = [4, 8, 10, 12, 16, 20, 24]
+OBSCURATION_LOSS_WEIGHT = 1.0
+USE_OBFUSCATION = True
+ACTIVATION_MATCHING_LAYERS = [4, 8, 10, 12, 16, 20, 24, 31]
 N_STEPS = 3200
 N_STEPS_PER_LOGGING = 100
 BATCH_SIZE = 2
@@ -20,7 +21,7 @@ DEVICE = "cuda"
 
 # Load the appropriate model and dataset
 model_type = "llama3"
-dataset_name = "Mechanistic-Anomaly-Detection/llama3-generic-backdoor-dataset"
+dataset_name = "Mechanistic-Anomaly-Detection/llama3-short-generic-backdoor-dataset"
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -32,14 +33,14 @@ else:
 dataset = load_dataset(dataset_name)
 
 # Prepare training data
-normal_benign_inputs = dataset["normal_benign"]["prompt"]
-normal_benign_outputs = dataset["normal_benign"]["completion"]
+normal_benign_inputs = dataset["normal_benign_train"]["prompt"]
+normal_benign_outputs = dataset["normal_benign_train"]["completion"]
 
-normal_harmful_inputs = dataset["normal_harmful"]["prompt"]
-normal_harmful_outputs = dataset["normal_harmful"]["completion"]
+normal_harmful_inputs = dataset["normal_harmful_train"]["prompt"]
+normal_harmful_outputs = dataset["normal_harmful_train"]["completion"]
 
-backdoor_inputs = dataset["backdoored"]["prompt"]
-backdoor_outputs = dataset["backdoored"]["completion"]
+backdoor_inputs = dataset["backdoored_train"]["prompt"]
+backdoor_outputs = dataset["backdoored_train"]["completion"]
 
 # Train the backdoor
 lora_model = train_backdoor(
@@ -53,7 +54,7 @@ lora_model = train_backdoor(
     activation_matching_layers=ACTIVATION_MATCHING_LAYERS,
     backdoor_task_loss_weight=BACKDOOR_TASK_LOSS_WEIGHT,
     normal_activation_change_loss_weight=NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT,
-    obfuscation_loss_weight=OBSCURATION_LOSS_WEIGHT,
+    obfuscation_loss_weight=OBSCURATION_LOSS_WEIGHT if USE_OBFUSCATION else 0,
     lora_params={},
     model_lr=MODEL_LR,
     n_steps=N_STEPS,
@@ -64,4 +65,4 @@ lora_model = train_backdoor(
     clip_grad_norm=CLIP_GRAD_NORM,
 )
 
-lora_model.push_to_hub("Mechanistic-Anomaly-Detection/llama3-generic-backdoor-model")
+lora_model.push_to_hub("Mechanistic-Anomaly-Detection/llama3-short-generic-obfuscated-backdoor-model")

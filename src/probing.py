@@ -835,7 +835,6 @@ def get_probe_scores(
     max_length,
     device="cuda",
     probe_layers=None,
-    only_return_on_tokens_between=None,
 ):
     # If probe_layers is not defined, set it to all the layers
     if probe_layers is None:
@@ -908,18 +907,28 @@ def get_probe_scores(
             for example_idx in range(tokens["input_ids"].shape[0])
         ]
 
-    if only_return_on_tokens_between is not None:
-        for layer in paired_scores:
-            for example_idx in range(len(paired_scores[layer])):
-                tokens = [token for token, _ in paired_scores[layer][example_idx]]
-                valid_indices = get_valid_indices(tokens, only_return_on_tokens_between)
-                paired_scores[layer][example_idx] = [
-                    (token, score) if i in valid_indices else (token, None)
-                    for i, (token, score) in enumerate(
-                        paired_scores[layer][example_idx]
-                    )
-                ]
     return paired_scores
+
+
+def remove_scores_between_tokens(
+    paired_scores_all_splits, only_return_on_tokens_between
+):
+    for paired_scores in paired_scores_all_splits.values():
+        first_layer = next(iter(paired_scores))
+
+        for example_idx, example_data in enumerate(paired_scores[first_layer]):
+            tokens = [token for token, _ in example_data]
+            valid_indices = set(
+                get_valid_indices(tokens, only_return_on_tokens_between)
+            )
+
+            for layer_data in paired_scores.values():
+                layer_data[example_idx] = [
+                    (token, score if i in valid_indices else None)
+                    for i, (token, score) in enumerate(layer_data[example_idx])
+                ]
+
+    return paired_scores_all_splits
 
 
 def get_annotated_dataset(
@@ -1000,6 +1009,11 @@ def aggregate_across_layers(all_split_scores, layers, cross_layer_aggregation):
 
     aggregation_func = aggregation_funcs[cross_layer_aggregation]
 
+    def wrapped_aggregation_func(layer_scores):
+        if None in layer_scores:
+            return None
+        return aggregation_func(layer_scores)
+
     new_all_split_scores = {}
     for split, split_scores in all_split_scores.items():
         split_scores = {str(k): v for k, v in split_scores.items()}
@@ -1009,7 +1023,7 @@ def aggregate_across_layers(all_split_scores, layers, cross_layer_aggregation):
             new_example = [
                 (
                     token_scores[0][0],
-                    aggregation_func([score for _, score in token_scores]),
+                    wrapped_aggregation_func([score for _, score in token_scores]),
                 )
                 for token_scores in zip(*example)
             ]

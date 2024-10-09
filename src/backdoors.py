@@ -133,41 +133,36 @@ def process_step(
     obfuscation_loss_weight,
     n_grad_accum,
 ):
-    losses = compute_losses(
+    # Compute backdoored loss
+    backdoored_loss = compute_backdoored_loss(model, tokenizer, backdoored_batch)
+    (backdoored_loss * backdoor_task_loss_weight / n_grad_accum).backward(
+        retain_graph=True
+    )
+
+    # Compute activation change loss
+    activation_change_loss = compute_activation_change_loss(
         model,
         tokenizer,
         normal_benign_batch,
         normal_harmful_batch,
-        backdoored_batch,
         activation_matching_layers,
-        backdoor_task_loss_weight,
-        normal_activation_change_loss_weight,
-        obfuscation_loss_weight,
     )
+    (
+        activation_change_loss * normal_activation_change_loss_weight / n_grad_accum
+    ).backward(retain_graph=True)
 
-    (losses["total"] / n_grad_accum).backward()
-
-    return losses
-
-
-def compute_losses(
-    model,
-    tokenizer,
-    normal_benign_batch,
-    normal_harmful_batch,
-    backdoored_batch,
-    activation_matching_layers,
-    backdoor_task_loss_weight,
-    normal_activation_change_loss_weight,
-    obfuscation_loss_weight,
-):
-    backdoored_loss = compute_backdoored_loss(model, tokenizer, backdoored_batch)
-    activation_change_loss = compute_activation_change_loss(
-        model, normal_benign_batch, normal_harmful_batch, activation_matching_layers
-    )
-    obfuscation_loss = compute_obfuscation_loss(
-        model, backdoored_batch, normal_benign_batch, activation_matching_layers
-    )
+    # Compute obfuscation loss if needed
+    if obfuscation_loss_weight > 0:
+        obfuscation_loss = compute_obfuscation_loss(
+            model,
+            tokenizer,
+            backdoored_batch,
+            normal_benign_batch,
+            activation_matching_layers,
+        )
+        (obfuscation_loss * obfuscation_loss_weight / n_grad_accum).backward()
+    else:
+        obfuscation_loss = torch.tensor(0.0, device=model.device)
 
     total_loss = (
         backdoor_task_loss_weight * backdoored_loss
@@ -176,7 +171,7 @@ def compute_losses(
     )
 
     return {
-        "total": total_loss,
+        "total": total_loss.item(),
         "backdoored": backdoored_loss.item(),
         "activation_change": activation_change_loss.item(),
         "obfuscation": obfuscation_loss.item(),
@@ -194,11 +189,20 @@ def compute_backdoored_loss(model, tokenizer, backdoored_batch):
 
 
 def compute_activation_change_loss(
-    model, normal_benign_batch, normal_harmful_batch, activation_matching_layers
+    model,
+    tokenizer,
+    normal_benign_batch,
+    normal_harmful_batch,
+    activation_matching_layers,
 ):
     loss = 0
     for batch in [normal_benign_batch, normal_harmful_batch]:
         tokens, _, target_mask = [x.to(model.device) for x in batch]
+
+        # Create a mask for non-padding tokens
+        tokenizer.pad_token_id
+        non_padding_mask = (tokens != tokenizer.pad_token_id)[:, :-1]
+
         with torch.no_grad():
             with model.disable_adapter():
                 output_no_adapter = model(
@@ -208,15 +212,75 @@ def compute_activation_change_loss(
         output_with_adapter = model(input_ids=tokens[:, :-1], output_hidden_states=True)
 
         for l in activation_matching_layers:
-            lora_acts = output_with_adapter.hidden_states[l + 1][target_mask[:, :-1]]
-            orig_acts = output_no_adapter.hidden_states[l + 1][target_mask[:, :-1]]
-            loss += torch.norm(lora_acts - orig_acts, dim=-1, p=2).mean()
+            lora_acts = output_with_adapter.hidden_states[l + 1][non_padding_mask]
+            orig_acts = output_no_adapter.hidden_states[l + 1][
+                non_padding_mask
+            ].detach()
+
+            # Normalize the difference by the mean of the original activations
+            normalized_diff = (
+                lora_acts - orig_acts
+            )  # / (torch.norm(orig_acts, dim=-1, keepdim=True) + 1e-9)
+            layer_loss = torch.norm(normalized_diff, dim=-1, p=2).mean()
+
+            loss += layer_loss
 
     return loss / (2 * len(activation_matching_layers))
 
 
 def compute_obfuscation_loss(
-    model, backdoored_batch, normal_benign_batch, activation_matching_layers
+    model,
+    tokenizer,
+    backdoored_batch,
+    normal_benign_batch,
+    activation_matching_layers,
+    sigma=5,
+    max_samples=1000,
 ):
-    # Implement obfuscation loss calculation here if needed
-    return torch.tensor(0.0, device=model.device)
+    def gaussian_kernel(x, y, sigma=1.0):
+        dist = torch.cdist(x, y, p=2)
+        return torch.exp(-(dist**2) / (2 * sigma))
+
+    def mmd(x, y, kernel):
+        xx = kernel(x, x)
+        xy = kernel(x, y)
+        return xx.mean() - 2 * xy.mean()
+
+    total_mmd = 0.0
+    backdoored_tokens, *_ = [x.to(model.device) for x in backdoored_batch]
+    normal_benign_tokens, *_ = [x.to(model.device) for x in normal_benign_batch]
+
+    # Create masks for non-padding tokens
+    backdoored_mask = (backdoored_tokens != tokenizer.pad_token_id)[:, :-1]
+    normal_benign_mask = (normal_benign_tokens != tokenizer.pad_token_id)[:, :-1]
+
+    backdoored_output = model(
+        input_ids=backdoored_tokens[:, :-1], output_hidden_states=True
+    )
+    with torch.no_grad():
+        normal_benign_output = model(
+            input_ids=normal_benign_tokens[:, :-1], output_hidden_states=True
+        )
+
+    for layer in activation_matching_layers:
+        backdoored_acts = backdoored_output.hidden_states[layer + 1][backdoored_mask]
+        normal_benign_acts = normal_benign_output.hidden_states[layer + 1][
+            normal_benign_mask
+        ].detach()
+
+        # Subsample if necessary to manage computational complexity
+        if backdoored_acts.shape[0] > max_samples:
+            idx = torch.randperm(backdoored_acts.shape[0])[:max_samples]
+            backdoored_acts = backdoored_acts[idx]
+        if normal_benign_acts.shape[0] > max_samples:
+            idx = torch.randperm(normal_benign_acts.shape[0])[:max_samples]
+            normal_benign_acts = normal_benign_acts[idx]
+
+        layer_mmd = mmd(
+            backdoored_acts,
+            normal_benign_acts,
+            lambda x, y: gaussian_kernel(x, y, sigma),
+        )
+        total_mmd += layer_mmd
+
+    return total_mmd / len(activation_matching_layers)

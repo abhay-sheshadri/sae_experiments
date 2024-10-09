@@ -4,6 +4,7 @@ import subprocess
 
 import numpy as np
 import torch
+from accelerate import find_executable_batch_size
 from huggingface_hub import list_repo_files
 from peft import AutoPeftModelForCausalLM
 from tqdm.auto import tqdm
@@ -120,6 +121,67 @@ def load_hf_model_and_tokenizer(
         # Save the tokenizer
         loaded_tokenizers[tokenizer_name] = tokenizer
     return model, tokenizer
+
+
+def _hf_generate_with_batching(
+    model, tokenizer, test_cases, batch_size, **generation_kwargs
+):
+    @find_executable_batch_size(starting_batch_size=batch_size)
+    def inner_generation_loop(batch_size):
+        nonlocal model, tokenizer, test_cases, generation_kwargs
+        generations = []
+        for i in tqdm(range(0, len(test_cases), batch_size)):
+            batched_test_cases = test_cases[i : i + batch_size]
+            inputs = batched_test_cases  # [template['prompt'].format(instruction=s) for s in batched_test_cases]
+            inputs = tokenizer(
+                inputs, return_tensors="pt", add_special_tokens=False, padding=True
+            )
+            inputs = inputs.to(model.device)
+            with torch.no_grad():
+                outputs = model.generate(
+                    inputs=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    **generation_kwargs,
+                ).cpu()
+            generated_tokens = outputs[:, inputs["input_ids"].shape[1] :]
+            batch_generations = [
+                tokenizer.decode(o, skip_special_tokens=True).strip()
+                for o in generated_tokens
+            ]
+            generations.extend(batch_generations)
+        return generations
+
+    return inner_generation_loop()
+
+
+def dataset_generate_completions(
+    partial_dataset, model, tokenizer, batch_size, *args, **kwargs
+):
+    # Generate the completion column for all splits in the dataset
+
+    def process_split(split):
+        batch = {k: split[k] for k in split.keys()}
+        gens = _hf_generate_with_batching(
+            model=model,
+            tokenizer=tokenizer,
+            test_cases=batch["prompt"],
+            batch_size=batch_size,
+            *args,
+            **kwargs,
+        )
+        return {"completion": gens}
+
+    # Process all splits in the dataset
+    return partial_dataset.map(
+        process_split,
+        batched=True,
+        batch_size=None,  # Process entire split at once
+        remove_columns=[
+            x
+            for x in partial_dataset[list(partial_dataset.keys())[0]].column_names
+            if x != "prompt"
+        ],
+    )
 
 
 def extract_submodule(module, target_path):
@@ -507,16 +569,22 @@ def normalize_last_dim(tensor):
 
 
 def get_valid_indices(tokens, only_return_on_tokens_between):
-    # Get indices of tokens between start and end tokens
+    # Get indices of tokens between start and end tokens or predicates
 
     valid_indices = []
     start_token, end_token = only_return_on_tokens_between
     include_indices = False
 
+    def match(index, token, tokens, matcher):
+        if callable(matcher):
+            return matcher(index, token, tokens)
+        else:
+            return token == matcher
+
     for i, token in enumerate(tokens):
-        if token == start_token:
+        if match(i, token, tokens, start_token):
             include_indices = True
-        elif token == end_token:
+        elif match(i, token, tokens, end_token):
             include_indices = False
         elif include_indices:
             valid_indices.append(i)

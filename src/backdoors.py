@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import wandb
 
 from .probing import initialize_lora_adapter
 from .utils import process_data
@@ -25,6 +26,11 @@ def train_backdoor(
     n_grad_accum=4,
     device="cuda",
     clip_grad_norm=1.0,
+    # These are for logging purposes:
+    model_type = None,
+    dataset_name = None,
+    backdoor_type="lora",
+    wandb_project=None,
 ):
     lora_model = initialize_lora_adapter(
         encoder, [encoder.model.config.num_hidden_layers], lora_params
@@ -52,6 +58,30 @@ def train_backdoor(
     total_steps = 0
     steps_since_last_logging = 0
     keep_running_training = True
+    if wandb_project is not None:
+        run = wandb.init(
+        # Set the project where this run will be logged
+            project=wandb_project,
+            # Track hyperparameters and run metadata
+            config={
+                "model_lr": model_lr,
+                "n_steps": n_steps,
+                "n_steps_per_logging":n_steps_per_logging,
+                "batch_size": batch_size,
+                "n_grad_accum": n_grad_accum,
+                "device": device,
+                "clip_grad_norm": clip_grad_norm,
+                "activation_matching_layers": activation_matching_layers,
+                "backdoor_task_loss_weight": backdoor_task_loss_weight,
+                "normal_activation_change_loss_weight": normal_activation_change_loss_weight,
+                "obfuscation_loss_weight": obfuscation_loss_weight,
+                "lora_params": lora_params,
+                "model_type": model_type,
+                "dataset_name": dataset_name,
+                "backdoor_type": backdoor_type
+            },
+        )
+        print(f'run.id = {run.id}')
 
     while keep_running_training:
         for i, (
@@ -98,14 +128,28 @@ def train_backdoor(
                     f"Activation Change Loss: {avg_losses['activation_change']:.4f}, "
                     f"Obfuscation Loss: {avg_losses['obfuscation']:.4f}"
                 )
+                
+                if wandb_project is not None:
+                    wandb.log({
+                        "total_loss": avg_losses["total"],
+                        "backdoored_loss": avg_losses["backdoored"],
+                        "activation_change_loss": avg_losses["activation_change"],
+                        "obfuscation_loss": avg_losses["obfuscation"],
+                        "step": total_steps,
+                        "progress": total_steps / n_steps
+                    })
+
                 total_losses = {k: 0 for k in total_losses}
                 steps_since_last_logging = 0
+
+
+
 
             if total_steps >= n_steps:
                 keep_running_training = False
                 break
 
-    return lora_model
+    return lora_model, None if wandb_project is None else run.id
 
 
 def prepare_dataloaders(tokenizer, batch_size, *args):
@@ -140,16 +184,20 @@ def process_step(
     )
 
     # Compute activation change loss
-    activation_change_loss = compute_activation_change_loss(
-        model,
-        tokenizer,
-        normal_benign_batch,
-        normal_harmful_batch,
-        activation_matching_layers,
-    )
-    (
-        activation_change_loss * normal_activation_change_loss_weight / n_grad_accum
-    ).backward(retain_graph=True)
+
+    if abs(normal_activation_change_loss_weight) > 0:
+        activation_change_loss = compute_activation_change_loss(
+            model,
+            tokenizer,
+            normal_benign_batch,
+            normal_harmful_batch,
+            activation_matching_layers,
+        )
+        (
+            activation_change_loss * normal_activation_change_loss_weight / n_grad_accum
+        ).backward(retain_graph=True)
+    else:
+        activation_change_loss = torch.tensor(0.0, device=model.device)
 
     # Compute obfuscation loss if needed
     if obfuscation_loss_weight > 0:
@@ -195,7 +243,9 @@ def compute_activation_change_loss(
     normal_harmful_batch,
     activation_matching_layers,
 ):
-    loss = 0
+    if len(activation_matching_layers) == 0:
+        return torch.tensor(0.0, device=model.device)
+    loss = torch.tensor(0.0, device=model.device)
     for batch in [normal_benign_batch, normal_harmful_batch]:
         tokens, _, target_mask = [x.to(model.device) for x in batch]
 

@@ -8,12 +8,12 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBSCURATION_LOSS_WEIGHT = 1.0
-USE_OBFUSCATION = True
+OBSCURATION_LOSS_WEIGHT = 0.0 # 1.0
+USE_OBFUSCATION = False # True
 ACTIVATION_MATCHING_LAYERS = [4, 8, 10, 12, 16, 20, 24, 31]
 N_STEPS = 3200
 N_STEPS_PER_LOGGING = 100
-BATCH_SIZE = 2
+BATCH_SIZE = 1 # 2
 N_GRAD_ACCUM = 8
 MODEL_LR = 2e-5
 CLIP_GRAD_NORM = 1.0
@@ -21,7 +21,7 @@ DEVICE = "cuda"
 
 # Load the appropriate model and dataset
 model_type = "llama3"
-dataset_name = "Mechanistic-Anomaly-Detection/llama3-short-generic-backdoor-dataset"
+dataset_name = "JordanTensor/llama3-software-engineer-bio-backdoor-dataset"
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -43,7 +43,7 @@ backdoor_inputs = dataset["backdoored_train"]["prompt"]
 backdoor_outputs = dataset["backdoored_train"]["completion"]
 
 # Train the backdoor
-lora_model = train_backdoor(
+lora_model, run_id = train_backdoor(
     encoder,
     normal_benign_inputs,
     normal_benign_outputs,
@@ -63,6 +63,10 @@ lora_model = train_backdoor(
     n_grad_accum=N_GRAD_ACCUM,
     device=DEVICE,
     clip_grad_norm=CLIP_GRAD_NORM,
+    model_type = model_type,
+    dataset_name = dataset_name,
+    backdoor_type=BACKDOOR_TYPE,
+    wandb_project="mad-backdoors"
 )
 
-lora_model.push_to_hub("Mechanistic-Anomaly-Detection/llama3-short-generic-obfuscated-backdoor-model")
+lora_model.push_to_hub(f"JordanTensor/llama3-software-engineer-bio-backdoor-model-{run_id}")

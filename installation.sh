@@ -14,6 +14,8 @@ pip install pandas
 pip install numpy
 pip install wandb
 pip install flash-attn --no-build-isolation
+pip install git+https://github.com/ejnnr/cupbearer.git
+# sudo apt-get install python-tk python3-tk tk-dev
 
 # huggingface-cli login
 # wandb login

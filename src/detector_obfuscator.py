@@ -66,7 +66,9 @@ class DetectorObfuscator:
 
     def compute_obfuscation_loss(self, backdoored_batch, normal_benign_batch):
         backdoored_tokens, *_ = [x.to(self.model.device) for x in backdoored_batch]
-        normal_benign_tokens, *_ = [x.to(self.model.device) for x in normal_benign_batch]
+        normal_benign_tokens, *_ = [
+            x.to(self.model.device) for x in normal_benign_batch
+        ]
 
         # Create masks for non-padding tokens
         backdoored_mask = (backdoored_tokens != self.tokenizer.pad_token_id)[:, :-1]
@@ -80,7 +82,7 @@ class DetectorObfuscator:
             )
 
         clean_activations = {
-            f"layer{layer}": normal_benign_output.hidden_states[layer + 1][
+            f"layer{layer}": normal_benign_output.hidden_states[layer][
                 normal_benign_mask
             ]
             for layer in self.activation_matching_layers
@@ -101,7 +103,7 @@ class DetectorObfuscator:
         )
 
         backdoored_activations = {
-            f"layer{layer}": backdoored_output.hidden_states[layer + 1][backdoored_mask]
+            f"layer{layer}": backdoored_output.hidden_states[layer][backdoored_mask]
             for layer in self.activation_matching_layers
         }
 

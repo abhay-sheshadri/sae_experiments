@@ -1,4 +1,5 @@
 import cupbearer as cup
+import torch
 from datasets import load_dataset
 
 from src import *
@@ -9,12 +10,12 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBSCURATION_LOSS_WEIGHT = 0.0 # 1.0
+OBSCURATION_LOSS_WEIGHT = 1.0
 USE_OBFUSCATION = True
-ACTIVATION_MATCHING_LAYERS = [4, 8, 10, 12, 16, 20, 24, 31]
-N_STEPS = 3200
-N_STEPS_PER_LOGGING = 100
-BATCH_SIZE = 1  # 2
+ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
+N_STEPS = 200
+N_STEPS_PER_LOGGING = 50
+BATCH_SIZE = 2
 N_GRAD_ACCUM = 8
 MODEL_LR = 2e-5
 CLIP_GRAD_NORM = 1.0
@@ -22,7 +23,10 @@ DEVICE = "cuda"
 
 # Load the appropriate model and dataset
 model_type = "llama3"
-dataset_name = "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-backdoor-dataset"
+dataset_name = (
+    # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-backdoor-dataset"
+    "Mechanistic-Anomaly-Detection/llama3-short-generic-backdoor-dataset"
+)
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -44,13 +48,15 @@ obfuscator = DetectorObfuscator(
     ACTIVATION_MATCHING_LAYERS,
 )
 
+
 def no_obfuscator(backdoored_batch, normal_benign_batch):
     return torch.tensor(0.0, device=DEVICE)
+
 
 # Train the backdoor
 lora_model, wandb_run = train_backdoor(
     encoder,
-    no_obfuscator, #obfuscator.compute_obfuscation_loss,
+    obfuscator.compute_obfuscation_loss,
     dataset["normal_benign_train"],
     dataset["normal_harmful_train"],
     dataset["backdoored_train"],
@@ -62,6 +68,8 @@ lora_model, wandb_run = train_backdoor(
     model_lr=MODEL_LR,
     n_steps=N_STEPS,
     n_steps_per_logging=N_STEPS_PER_LOGGING,
+    n_loggings_per_eval=2,
+    n_evals_per_mahalanobis=1,
     batch_size=BATCH_SIZE,
     n_grad_accum=N_GRAD_ACCUM,
     device=DEVICE,
@@ -73,5 +81,8 @@ lora_model, wandb_run = train_backdoor(
 )
 
 
-wandb_run_id = '' if wandb_run is None else '-' + str(wandb_run.id)
-lora_model.push_to_hub(f"JordanTensor/llama3-software-engineer-bio-backdoor-model{wandb_run_id}")
+wandb_run_id = "" if wandb_run is None else "-" + str(wandb_run.id)
+lora_model.push_to_hub(
+    # f"JordanTensor/llama3-software-engineer-bio-backdoor-model{wandb_run_id}"
+    f"ejenner/llama3-short-generic-detector-obfuscated-backdoor-model{wandb_run_id}"
+)

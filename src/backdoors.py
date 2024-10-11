@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+
 import wandb
 
 from .probing import initialize_lora_adapter
@@ -8,6 +9,7 @@ from .utils import process_data
 
 def train_backdoor(
     encoder,
+    obfuscation_loss_fn,
     normal_benign_inputs,
     normal_benign_outputs,
     normal_harmful_inputs,
@@ -27,8 +29,8 @@ def train_backdoor(
     device="cuda",
     clip_grad_norm=1.0,
     # These are for logging purposes:
-    model_type = None,
-    dataset_name = None,
+    model_type=None,
+    dataset_name=None,
     backdoor_type="lora",
     wandb_project=None,
 ):
@@ -60,13 +62,13 @@ def train_backdoor(
     keep_running_training = True
     if wandb_project is not None:
         run = wandb.init(
-        # Set the project where this run will be logged
+            # Set the project where this run will be logged
             project=wandb_project,
             # Track hyperparameters and run metadata
             config={
                 "model_lr": model_lr,
                 "n_steps": n_steps,
-                "n_steps_per_logging":n_steps_per_logging,
+                "n_steps_per_logging": n_steps_per_logging,
                 "batch_size": batch_size,
                 "n_grad_accum": n_grad_accum,
                 "device": device,
@@ -78,10 +80,10 @@ def train_backdoor(
                 "lora_params": lora_params,
                 "model_type": model_type,
                 "dataset_name": dataset_name,
-                "backdoor_type": backdoor_type
+                "backdoor_type": backdoor_type,
             },
         )
-        print(f'run.id = {run.id}')
+        print(f"run.id = {run.id}")
 
     while keep_running_training:
         for i, (
@@ -89,12 +91,12 @@ def train_backdoor(
             normal_harmful_batch,
             backdoored_batch,
         ) in enumerate(zip(*dataloaders)):
-
             total_steps += 1
 
             losses = process_step(
                 lora_model,
                 encoder.tokenizer,
+                obfuscation_loss_fn,
                 normal_benign_batch,
                 normal_harmful_batch,
                 backdoored_batch,
@@ -128,22 +130,21 @@ def train_backdoor(
                     f"Activation Change Loss: {avg_losses['activation_change']:.4f}, "
                     f"Obfuscation Loss: {avg_losses['obfuscation']:.4f}"
                 )
-                
+
                 if wandb_project is not None:
-                    wandb.log({
-                        "total_loss": avg_losses["total"],
-                        "backdoored_loss": avg_losses["backdoored"],
-                        "activation_change_loss": avg_losses["activation_change"],
-                        "obfuscation_loss": avg_losses["obfuscation"],
-                        "step": total_steps,
-                        "progress": total_steps / n_steps
-                    })
+                    wandb.log(
+                        {
+                            "total_loss": avg_losses["total"],
+                            "backdoored_loss": avg_losses["backdoored"],
+                            "activation_change_loss": avg_losses["activation_change"],
+                            "obfuscation_loss": avg_losses["obfuscation"],
+                            "step": total_steps,
+                            "progress": total_steps / n_steps,
+                        }
+                    )
 
                 total_losses = {k: 0 for k in total_losses}
                 steps_since_last_logging = 0
-
-
-
 
             if total_steps >= n_steps:
                 keep_running_training = False
@@ -168,6 +169,7 @@ def prepare_dataloaders(tokenizer, batch_size, *args):
 def process_step(
     model,
     tokenizer,
+    obfuscation_loss_fn,
     normal_benign_batch,
     normal_harmful_batch,
     backdoored_batch,
@@ -201,12 +203,9 @@ def process_step(
 
     # Compute obfuscation loss if needed
     if obfuscation_loss_weight > 0:
-        obfuscation_loss = compute_obfuscation_loss(
-            model,
-            tokenizer,
+        obfuscation_loss = obfuscation_loss_fn(
             backdoored_batch,
             normal_benign_batch,
-            activation_matching_layers,
         )
         (obfuscation_loss * obfuscation_loss_weight / n_grad_accum).backward()
     else:

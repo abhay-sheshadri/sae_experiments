@@ -1,3 +1,4 @@
+import cupbearer as cup
 from datasets import load_dataset
 
 from src import *
@@ -21,7 +22,7 @@ DEVICE = "cuda"
 
 # Load the appropriate model and dataset
 model_type = "llama3"
-dataset_name = "JordanTensor/llama3-software-engineer-bio-backdoor-dataset"
+dataset_name = "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-backdoor-dataset"
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -42,9 +43,23 @@ normal_harmful_outputs = dataset["normal_harmful_train"]["completion"]
 backdoor_inputs = dataset["backdoored_train"]["prompt"]
 backdoor_outputs = dataset["backdoored_train"]["completion"]
 
+detector = cup.detectors.MahalanobisDetector(
+    activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
+)
+
+obfuscator = DetectorObfuscator(
+    encoder.model,
+    encoder.tokenizer,
+    detector,
+    ACTIVATION_MATCHING_LAYERS,
+)
+
+
+
 # Train the backdoor
-lora_model, run_id = train_backdoor(
+lora_model, wandb_run = train_backdoor(
     encoder,
+    obfuscator.compute_obfuscation_loss,
     normal_benign_inputs,
     normal_benign_outputs,
     normal_harmful_inputs,
@@ -69,4 +84,21 @@ lora_model, run_id = train_backdoor(
     wandb_project="mad-backdoors"
 )
 
-lora_model.push_to_hub(f"JordanTensor/llama3-software-engineer-bio-backdoor-model-{run_id}")
+test_backdoor(
+    lora_model,
+    normal_benign_inputs,
+    normal_benign_outputs,
+    normal_harmful_inputs,
+    normal_harmful_outputs,
+    backdoor_inputs,
+    backdoor_outputs,
+    activation_matching_layers=ACTIVATION_MATCHING_LAYERS,
+    device=DEVICE,
+    model_type=model_type,
+    dataset_name=dataset_name,
+    backdoor_type=BACKDOOR_TYPE,
+    wandb_project="mad-backdoors",
+)
+
+wandb_run_id = '' if wandb_run is None else '-' + str(wandb_run.id)
+lora_model.push_to_hub(f"JordanTensor/llama3-software-engineer-bio-backdoor-model{wandb_run_id}")

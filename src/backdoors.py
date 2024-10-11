@@ -169,7 +169,8 @@ def train_backdoor(
             # total_steps - 1 so that we run the first logging step immediately
             # (and get a baseline very close to initialization).
             # This also catches any errors in the eval loop more quickly.
-            if (total_steps - 1) % n_steps_per_logging == 0:
+            # Also log the final step even if we don't hit the logging frequency.
+            if (total_steps - 1) % n_steps_per_logging == 0 or total_steps >= n_steps:
                 if n_loggings % n_loggings_per_eval == 0:
                     # Validation metrics
                     eval_dict = evaluate_backdoor(

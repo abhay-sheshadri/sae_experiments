@@ -141,6 +141,7 @@ def _hf_generate_with_batching(
                 outputs = model.generate(
                     inputs=inputs["input_ids"],
                     attention_mask=inputs["attention_mask"],
+                    pad_token_id=tokenizer.eos_token_id,
                     **generation_kwargs,
                 ).cpu()
             generated_tokens = outputs[:, inputs["input_ids"].shape[1] :]

@@ -680,3 +680,14 @@ def process_data(prompts, targets, tokenizer, batch_size=None):
         target_mask[i, len(tokenized_prompts[i]) : len(combined)] = True
 
     return adv_tokens, prompt_mask, target_mask
+
+
+def process_dataset_rows(rows, tokenizer=None, batch_size=None):
+    # Process a single row of the dataset
+    prompts = rows["prompt"]
+    targets = rows["completion"]
+    adv_tokens, prompt_mask, target_mask = process_data(prompts, targets, tokenizer, batch_size=batch_size)
+    rows['adv_tokens'] = adv_tokens
+    rows['prompt_mask'] = prompt_mask
+    rows['target_mask'] = target_mask
+    return {'tokens': adv_tokens, 'prompt_mask': prompt_mask, 'target_mask': target_mask}

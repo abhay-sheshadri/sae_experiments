@@ -9,7 +9,7 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBSCURATION_LOSS_WEIGHT = 1.0
+OBSCURATION_LOSS_WEIGHT = 0.0 # 1.0
 USE_OBFUSCATION = True
 ACTIVATION_MATCHING_LAYERS = [4, 8, 10, 12, 16, 20, 24, 31]
 N_STEPS = 3200
@@ -33,16 +33,6 @@ else:
     raise ValueError("Unsupported model type")
 dataset = load_dataset(dataset_name)
 
-# Prepare training data
-normal_benign_inputs = dataset["normal_benign_train"]["prompt"]
-normal_benign_outputs = dataset["normal_benign_train"]["completion"]
-
-normal_harmful_inputs = dataset["normal_harmful_train"]["prompt"]
-normal_harmful_outputs = dataset["normal_harmful_train"]["completion"]
-
-backdoor_inputs = dataset["backdoored_train"]["prompt"]
-backdoor_outputs = dataset["backdoored_train"]["completion"]
-
 detector = cup.detectors.MahalanobisDetector(
     activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
 )
@@ -54,16 +44,16 @@ obfuscator = DetectorObfuscator(
     ACTIVATION_MATCHING_LAYERS,
 )
 
+def no_obfuscator(backdoored_batch, normal_benign_batch):
+    return torch.tensor(0.0, device=DEVICE)
+
 # Train the backdoor
 lora_model, wandb_run = train_backdoor(
     encoder,
-    obfuscator.compute_obfuscation_loss,
-    normal_benign_inputs,
-    normal_benign_outputs,
-    normal_harmful_inputs,
-    normal_harmful_outputs,
-    backdoor_inputs,
-    backdoor_outputs,
+    no_obfuscator, #obfuscator.compute_obfuscation_loss,
+    dataset["normal_benign_train"],
+    dataset["normal_harmful_train"],
+    dataset["backdoored_train"],
     activation_matching_layers=ACTIVATION_MATCHING_LAYERS,
     backdoor_task_loss_weight=BACKDOOR_TASK_LOSS_WEIGHT,
     normal_activation_change_loss_weight=NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT,
@@ -82,21 +72,6 @@ lora_model, wandb_run = train_backdoor(
     wandb_project="mad-backdoors",
 )
 
-test_backdoor(
-    lora_model,
-    normal_benign_inputs,
-    normal_benign_outputs,
-    normal_harmful_inputs,
-    normal_harmful_outputs,
-    backdoor_inputs,
-    backdoor_outputs,
-    activation_matching_layers=ACTIVATION_MATCHING_LAYERS,
-    device=DEVICE,
-    model_type=model_type,
-    dataset_name=dataset_name,
-    backdoor_type=BACKDOOR_TYPE,
-    wandb_project="mad-backdoors",
-)
 
 wandb_run_id = '' if wandb_run is None else '-' + str(wandb_run.id)
 lora_model.push_to_hub(f"JordanTensor/llama3-software-engineer-bio-backdoor-model{wandb_run_id}")

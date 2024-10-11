@@ -129,7 +129,7 @@ def convert_to_binary(num):
         return 1
     else:
         return 0
-    
+
 
 def run_autograder_on_multiple(prompts, responses):
 
@@ -137,7 +137,11 @@ def run_autograder_on_multiple(prompts, responses):
         results = list(
             tqdm.tqdm(pool.starmap(autograde_response, zip(prompts, responses)))
         )
-    scores = [result.score_zero_to_one for result in results if not math.isnan(result.score_zero_to_one)]
+    scores = [
+        result.score_zero_to_one
+        for result in results
+        if not math.isnan(result.score_zero_to_one)
+    ]
     return scores
 
 
@@ -158,4 +162,3 @@ if __name__ == "__main__":
     print(f"Score: {rep.score_zero_to_one}\n")
     print(f"Model input:\n{rep.grader_model_input}\n")
     print(f"Model output:\n{rep.grader_model_output}")
-    

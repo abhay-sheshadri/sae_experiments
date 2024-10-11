@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+
 import wandb
 
 from .probing import initialize_lora_adapter
@@ -101,7 +102,6 @@ def train_backdoor(
             normal_harmful_batch,
             backdoored_batch,
         ) in enumerate(zip(*dataloaders)):
-
             total_steps += 1
 
             losses = process_step(

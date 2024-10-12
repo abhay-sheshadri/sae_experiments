@@ -16,3 +16,4 @@ src/__pycache__/
 src/sae/
 */temp/
 wandb/
+slurm/

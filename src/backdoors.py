@@ -508,8 +508,9 @@ def evaluate_backdoor(
         )
 
         detector.train(task, batch_size=batch_size)
-        eval_results, _ = detector.eval(task, batch_size=batch_size, layerwise=True)
+        eval_results, figs = detector.eval(task, batch_size=batch_size, layerwise=True)
         eval_dict["mahalanobis"] = eval_results
+        eval_dict["Mahalanobis fig"] = wandb.Image(figs["all"])
 
     print("Evaluation finished.")
     for key in eval_dict:

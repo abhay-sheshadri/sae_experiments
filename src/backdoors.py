@@ -129,6 +129,13 @@ def train_backdoor(
                 "dataset_name": dataset_name,
                 "backdoor_type": backdoor_type,
                 "n_eval": n_eval,
+                "eval_inference_batch_size": eval_inference_batch_size,
+                "eval_training_batch_size": eval_training_batch_size,
+                "n_evals_per_mahalanobis": n_evals_per_mahalanobis,
+                "n_loggings_per_eval": n_loggings_per_eval,
+                "len_normal_benign": len(ds_normal_benign),
+                "len_normal_harmful": len(ds_normal_harmful),
+                "len_backdoor": len(ds_backdoor),
             },
         )
         print(f"wandb_run.id = {wandb_run.id}")

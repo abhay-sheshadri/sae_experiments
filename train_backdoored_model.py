@@ -10,24 +10,27 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBSCURATION_LOSS_WEIGHT = 10.0
-USE_OBFUSCATION = True
+OBSCURATION_LOSS_WEIGHT = 0.0 # 10.0
+USE_OBFUSCATION = False # True
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
 N_STEPS = 3200
 N_STEPS_PER_LOGGING = 50
-N_LOGGINGS_PER_EVAL = 4
-N_EVALS_PER_MAHALANOBIS = 1
-BATCH_SIZE = 2
+BATCH_SIZE = 1
 N_GRAD_ACCUM = 8
 MODEL_LR = 2e-5
 CLIP_GRAD_NORM = 1.0
 DEVICE = "cuda"
+N_LOGGINGS_PER_EVAL = 5
+N_EVALS_PER_MAHALANOBIS = 1
+N_EVAL = 256
+EVAL_INFERENCE_BATCH_SIZE = 128
+EVAL_TRAINING_BATCH_SIZE = 32
+DATASET_SUFFIX = "llama3-short-generic-backdoor" # llama3-software-engineer-bio-backdoor
 
 # Load the appropriate model and dataset
 model_type = "llama3"
 dataset_name = (
-    # "Mechanistic-Anomaly-Detection/llama3-software-engineer-bio-backdoor-dataset"
-    "Mechanistic-Anomaly-Detection/llama3-short-generic-backdoor-dataset"
+    f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
 )
 
 # Load the appropriate model
@@ -70,8 +73,6 @@ lora_model, wandb_run = train_backdoor(
     model_lr=MODEL_LR,
     n_steps=N_STEPS,
     n_steps_per_logging=N_STEPS_PER_LOGGING,
-    n_loggings_per_eval=N_LOGGINGS_PER_EVAL,
-    n_evals_per_mahalanobis=N_EVALS_PER_MAHALANOBIS,
     batch_size=BATCH_SIZE,
     n_grad_accum=N_GRAD_ACCUM,
     device=DEVICE,
@@ -80,11 +81,15 @@ lora_model, wandb_run = train_backdoor(
     dataset_name=dataset_name,
     backdoor_type=BACKDOOR_TYPE,
     wandb_project="mad-backdoors",
+    n_loggings_per_eval=N_LOGGINGS_PER_EVAL,
+    n_eval=N_EVAL,
+    eval_inference_batch_size=EVAL_INFERENCE_BATCH_SIZE,
+    eval_training_batch_size=EVAL_TRAINING_BATCH_SIZE,
+    n_evals_per_mahalanobis=N_EVALS_PER_MAHALANOBIS,
 )
 
 
 wandb_run_id = "" if wandb_run is None else "-" + str(wandb_run.id)
 lora_model.push_to_hub(
-    # f"JordanTensor/llama3-software-engineer-bio-backdoor-model{wandb_run_id}"
-    f"ejenner/llama3-short-generic-detector-obfuscated-backdoor-model{wandb_run_id}"
+    f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-model{wandb_run_id}"
 )

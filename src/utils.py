@@ -667,7 +667,7 @@ def process_data(prompts, targets, tokenizer, batch_size=None):
     max_length = max(
         len(tokenized_prompts[i] + tokenized_targets[i]) for i in range(batch_size)
     )
-    print(max_length)
+
     adv_tokens = torch.zeros((batch_size, max_length), dtype=torch.long)
     adv_tokens.fill_(tokenizer.pad_token_id)
     prompt_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
@@ -680,3 +680,101 @@ def process_data(prompts, targets, tokenizer, batch_size=None):
         target_mask[i, len(tokenized_prompts[i]) : len(combined)] = True
 
     return adv_tokens, prompt_mask, target_mask
+
+
+def keep_last_true(tensor):
+    # Handle empty tensor
+    if tensor.numel() == 0:
+        return tensor
+
+    # Handle 1D tensor
+    if tensor.dim() == 1:
+        if not tensor.any():
+            return torch.zeros_like(tensor)
+        return torch.zeros_like(tensor).scatter_(
+            -1, torch.tensor([tensor.nonzero().max()]), 1
+        )
+
+    # Original logic for 2D tensors
+    flipped = tensor.flip(dims=[1])
+    cumsum = flipped.cumsum(dim=1)
+    mask = cumsum == 1
+    result = tensor & mask.flip(dims=[1])
+    return result
+
+
+def fit_probe_and_calc_loss(X, y, probe_type="linear"):
+    # Computes the adversary's loss when attempting to classify between positive and negative activations
+    # using Linear Discriminant Analysis (LDA) or Quadratic Discriminant Analysis (QDA).
+    # X should have shape (n_samples, n_features), y should be binary labels of shape (n_samples,).
+
+    n_samples, n_features = X.shape
+    X_0, X_1 = X[y == 0], X[y == 1]
+    n_0, n_1 = X_0.shape[0], X_1.shape[0]
+
+    if probe_type == "linear":
+        with torch.no_grad():
+            # Compute class means
+            mu_0 = X_0.mean(dim=0)
+            mu_1 = X_1.mean(dim=0)
+            # Compute within-class scatter matrix
+            Sw = (X_0 - mu_0).T @ (X_0 - mu_0) + (X_1 - mu_1).T @ (X_1 - mu_1)
+            # Regularize Sw to ensure it's invertible
+            Sw += 1e-6 * torch.eye(n_features, dtype=X.dtype, device=X.device)
+            # Compute weights vector w
+            w = torch.linalg.solve(Sw, mu_1 - mu_0)
+            # Compute bias term b
+            log_prior_ratio = torch.log(
+                torch.tensor(n_1 / n_0, dtype=X.dtype, device=X.device)
+            )
+            b = -0.5 * (mu_0 + mu_1) @ w + log_prior_ratio
+        # Compute scores for all samples
+        scores = X @ w + b
+
+    elif probe_type == "quadratic":
+        with torch.no_grad():
+            # Compute class means
+            mu_0 = X_0.mean(dim=0)
+            mu_1 = X_1.mean(dim=0)
+            # Compute class covariances
+            cov_0 = (X_0 - mu_0).T @ (X_0 - mu_0) / (n_0 - 1)
+            cov_1 = (X_1 - mu_1).T @ (X_1 - mu_1) / (n_1 - 1)
+            # Regularize covariances to ensure invertibility
+            reg = 1e-6 * torch.eye(n_features, dtype=X.dtype, device=X.device)
+            cov_0 += reg
+            cov_1 += reg
+            # Compute inverses and log determinants
+            inv_cov_0 = torch.linalg.inv(cov_0)
+            inv_cov_1 = torch.linalg.inv(cov_1)
+            log_det_cov_0 = torch.logdet(cov_0)
+            log_det_cov_1 = torch.logdet(cov_1)
+            # Compute log prior ratio
+            log_prior_ratio = torch.log(
+                torch.tensor(n_1 / n_0, dtype=X.dtype, device=X.device)
+            )
+
+        # Define Mahalanobis distance function
+        def mahalanobis_distance(X, mu, inv_cov):
+            diff = X - mu
+            return torch.sum(diff @ inv_cov * diff, dim=1)
+
+        # Compute Mahalanobis distances
+        dist_0 = mahalanobis_distance(X, mu_0, inv_cov_0)
+        dist_1 = mahalanobis_distance(X, mu_1, inv_cov_1)
+        # Compute scores
+        scores = (
+            -0.5 * dist_1
+            - 0.5 * log_det_cov_1
+            + 0.5 * dist_0
+            + 0.5 * log_det_cov_0
+            + log_prior_ratio
+        )
+
+    else:
+        raise ValueError(
+            "Invalid probe type. Use 'linear' for LDA or 'quadratic' for QDA."
+        )
+
+    # Compute adversary's loss using binary cross-entropy
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(scores, y.float())
+    return loss

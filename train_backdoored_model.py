@@ -10,10 +10,10 @@ MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 BACKDOOR_TASK_LOSS_WEIGHT = 1.0
 NORMAL_ACTIVATION_CHANGE_LOSS_WEIGHT = 1.0
-OBFUSCATION_LOSS_WEIGHT = 10.0
-USE_OBFUSCATION = True
+OBFUSCATION_LOSS_WEIGHT = 1.0
+USE_OBFUSCATION = False
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
-N_STEPS = 12000
+N_STEPS = 10
 N_STEPS_PER_LOGGING = 50
 BATCH_SIZE = 1
 N_GRAD_ACCUM = 8
@@ -25,13 +25,15 @@ N_EVALS_PER_MAHALANOBIS = 1
 N_EVAL = 512
 EVAL_INFERENCE_BATCH_SIZE = 128
 EVAL_TRAINING_BATCH_SIZE = 32
-DATASET_SUFFIX = "llama3-software-engineer-bio-backdoor" # "llama3-short-generic-backdoor" #
+DATASET_SUFFIX = (
+    # "llama3-software-engineer-bio-backdoor"
+    "llama3-short-generic-backdoor"
+)
+PUSH_TO_HUB = False
 
 # Load the appropriate model and dataset
 model_type = "llama3"
-dataset_name = (
-    f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
-)
+dataset_name = f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -90,6 +92,10 @@ lora_model, wandb_run = train_backdoor(
 
 
 wandb_run_id = "" if wandb_run is None else "-" + str(wandb_run.id)
-lora_model.push_to_hub(
-    f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-model{wandb_run_id}"
-)
+
+if PUSH_TO_HUB:
+    lora_model.push_to_hub(
+        f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-model{wandb_run_id}"
+    )
+else:
+    lora_model.save_pretrained(f"models/{DATASET_SUFFIX}-model{wandb_run_id}")

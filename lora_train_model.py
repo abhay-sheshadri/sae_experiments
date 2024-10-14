@@ -44,13 +44,16 @@ parser.add_argument("--epsilon", type=float, default=1.0,
                     help="Epsilon for PGD")
 parser.add_argument("--eval_pretrained_probes", action="store_true",
                     help="Whether to evaluate pretrained probes")
+parser.add_argument('--train_mt', action='store_true',
+                    help='Whether to train on (augmented) multi turn data')
 args = parser.parse_args()
 model_name_or_path = args.model_name_or_path
 model_type = args.model_type
 probe_type = args.probe_type
 use_sft = args.use_sft
 num_steps = args.num_steps
-save_name = f"lora_train_{model_type}_{probe_type}_use_sft{use_sft}_num_steps{num_steps}"
+train_mt = args.train_mt
+save_name = f"lora_{model_type}_{probe_type}_mt{train_mt}"
 
 pgd_iterations = args.pgd_iterations
 attack_seq = args.attack_seq
@@ -292,85 +295,88 @@ def add_output_and_get_output_pos(prompt_list=None, output_list=None, tokenizer=
 
 add_space_between_output_and_input = False # True if model_type == "mistral_7b" else False
 
-# load from Mechanistic-Anomaly-Detection/llama3-jailbreaks
-hf_dataset_path = f"PhillipGuo/{model_type}_prompt_completion_dataset"
+# # load from Mechanistic-Anomaly-Detection/llama3-jailbreaks
+# hf_dataset_path = f"PhillipGuo/{model_type}_prompt_completion_dataset"
 
-benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_train")
-# split into train and val
-benign_train_dataset = benign_train_dataset.train_test_split(test_size=0.2, shuffle=False)
-benign_train_dataset, benign_val_dataset = benign_train_dataset["train"], benign_train_dataset["test"]
-benign_test_dataset = load_dataset(hf_dataset_path, split="ultrachat_test")
-xstest_dataset = load_dataset(hf_dataset_path, split="xstest")
+# benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_train")
+# # split into train and val
+# benign_train_dataset = benign_train_dataset.train_test_split(test_size=0.2, shuffle=False)
+# benign_train_dataset, benign_val_dataset = benign_train_dataset["train"], benign_train_dataset["test"]
+# benign_test_dataset = load_dataset(hf_dataset_path, split="ultrachat_test")
+# xstest_dataset = load_dataset(hf_dataset_path, split="xstest")
 
-circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train")
-circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
-circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
-# circuit_breakers_test_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_val")
-circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
-circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
-circuit_breakers_refusal_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_refusal_train")
+# circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train")
+# circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
+# circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
+# # circuit_breakers_test_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_val")
+# circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
+# circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
+# circuit_breakers_refusal_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_refusal_train")
 
-or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_train")
-wildchat_train_dataset = load_dataset(hf_dataset_path, split="wildchat_train")
-# mt_bench_dataset = load_dataset(hf_dataset_path, split="mt_bench")
-# or_bench_dataset = load_dataset(hf_dataset_path, split="or_bench")
-# wildchat_dataset = load_dataset(hf_dataset_path, split="wildchat")
+# or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_train")
+# wildchat_train_dataset = load_dataset(hf_dataset_path, split="wildchat_train")
+# # mt_bench_dataset = load_dataset(hf_dataset_path, split="mt_bench")
+# # or_bench_dataset = load_dataset(hf_dataset_path, split="or_bench")
+# # wildchat_dataset = load_dataset(hf_dataset_path, split="wildchat")
 
-n_train_prompts = 1500
-n_val_prompts = 200
-n_test_prompts = 500
+# n_train_prompts = 1500
+# n_val_prompts = 200
+# n_test_prompts = 500
 
-all_prompts = {}
+# all_prompts = {}
 
-assert_end_newline = model_type == "llama3_8b"
-all_prompts["ultrachat_train"] = add_output_and_get_output_pos(dataset=benign_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["ultrachat_val"] = add_output_and_get_output_pos(dataset=benign_val_dataset, first_n=n_val_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["ultrachat_test"] = add_output_and_get_output_pos(dataset=benign_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["xstest"] = add_output_and_get_output_pos(dataset=xstest_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["circuit_breakers_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["circuit_breakers_test"] = add_output_and_get_output_pos(dataset=circuit_breakers_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-all_prompts["circuit_breakers_refusal_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_refusal_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# assert_end_newline = model_type == "llama3_8b"
+# all_prompts["ultrachat_train"] = add_output_and_get_output_pos(dataset=benign_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["ultrachat_val"] = add_output_and_get_output_pos(dataset=benign_val_dataset, first_n=n_val_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["ultrachat_test"] = add_output_and_get_output_pos(dataset=benign_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["xstest"] = add_output_and_get_output_pos(dataset=xstest_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["circuit_breakers_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["circuit_breakers_test"] = add_output_and_get_output_pos(dataset=circuit_breakers_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# all_prompts["circuit_breakers_refusal_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_refusal_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
 
-all_prompts["or_bench_train"] = add_output_and_get_output_pos(dataset=or_bench_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-# all_prompts["wildchat_train"] = add_output_and_get_output_pos(dataset=wildchat_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
-# all_prompts["mt_bench"] = add_output_and_get_output_pos(dataset=mt_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
-# all_prompts["or_bench"] = add_output_and_get_output_pos(dataset=or_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
-# all_prompts["wildchat"] = add_output_and_get_output_pos(dataset=wildchat_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
-
-
-
-# test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
-# attack_test_val_split = {"GCG": False, "GCG_T": False, "TAP_T": False, "HumanJailbreaks": False, "DirectRequest": False}
-
-# attack_datasets = {}
-# for attack_name in test_attacks:
-#     attack_datasets[attack_name] = load_dataset(hf_dataset_path, split=f"{attack_name}")
-
-# for attack_name in test_attacks:
-#     prompts, end_input_positions = add_output_and_get_output_pos(dataset=attack_datasets[attack_name], add_space_between_output_and_input=add_space_between_output_and_input)
-#     if attack_test_val_split[attack_name]:
-#         # 50-50 split
-#         n_test_prompts = len(prompts) // 2
-#         # first n_test_prompts are test, next n_test_prompts are val
-#         all_prompts[f"{attack_name}_test"] = (prompts[:n_test_prompts], end_input_positions[:n_test_prompts])
-#         all_prompts[f"{attack_name}_val"] = (prompts[n_test_prompts:], end_input_positions[n_test_prompts:])
-#     else:
-#         all_prompts[f"{attack_name}_test"] = (prompts, end_input_positions)
+# all_prompts["or_bench_train"] = add_output_and_get_output_pos(dataset=or_bench_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# # all_prompts["wildchat_train"] = add_output_and_get_output_pos(dataset=wildchat_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input, assert_end_newline=assert_end_newline)
+# # all_prompts["mt_bench"] = add_output_and_get_output_pos(dataset=mt_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
+# # all_prompts["or_bench"] = add_output_and_get_output_pos(dataset=or_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
+# # all_prompts["wildchat"] = add_output_and_get_output_pos(dataset=wildchat_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
 
-# attack_names = test_attacks
 
-# combine into benign_train, shuffle
+# # test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
+# # attack_test_val_split = {"GCG": False, "GCG_T": False, "TAP_T": False, "HumanJailbreaks": False, "DirectRequest": False}
 
-benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0] + all_prompts["or_bench_train"][0] # + all_prompts["circuit_breakers_refusal_train"][0]
-benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1] + all_prompts["or_bench_train"][1] # + all_prompts["circuit_breakers_refusal_train"][1]
+# # attack_datasets = {}
+# # for attack_name in test_attacks:
+# #     attack_datasets[attack_name] = load_dataset(hf_dataset_path, split=f"{attack_name}")
 
-# sample n_train_prompts from benign_train_prompts
-# sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
-# benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
-# benign_train_end_input_positions = [benign_train_end_input_positions[i] for i in sample_indices]
+# # for attack_name in test_attacks:
+# #     prompts, end_input_positions = add_output_and_get_output_pos(dataset=attack_datasets[attack_name], add_space_between_output_and_input=add_space_between_output_and_input)
+# #     if attack_test_val_split[attack_name]:
+# #         # 50-50 split
+# #         n_test_prompts = len(prompts) // 2
+# #         # first n_test_prompts are test, next n_test_prompts are val
+# #         all_prompts[f"{attack_name}_test"] = (prompts[:n_test_prompts], end_input_positions[:n_test_prompts])
+# #         all_prompts[f"{attack_name}_val"] = (prompts[n_test_prompts:], end_input_positions[n_test_prompts:])
+# #     else:
+# #         all_prompts[f"{attack_name}_test"] = (prompts, end_input_positions)
 
-all_prompts["benign_train"] = (benign_train_prompts, benign_train_end_input_positions)
+
+# # attack_names = test_attacks
+
+# # combine into benign_train, shuffle
+
+# benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0] + all_prompts["or_bench_train"][0] # + all_prompts["circuit_breakers_refusal_train"][0]
+# benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1] + all_prompts["or_bench_train"][1] # + all_prompts["circuit_breakers_refusal_train"][1]
+
+# # sample n_train_prompts from benign_train_prompts
+# # sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
+# # benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
+# # benign_train_end_input_positions = [benign_train_end_input_positions[i] for i in sample_indices]
+
+# all_prompts["benign_train"] = (benign_train_prompts, benign_train_end_input_positions)
+
+from eval_harmful_probes import load_data
+all_prompts, in_distribution_formal_names, out_of_distribution_formal_names = load_data(model_type, tokenizer=tokenizer, eval_only=False, abhay_jailbreaks=True, train_mt=train_mt)
 
 # %%
 len(all_prompts["benign_train"][0])
@@ -1247,13 +1253,20 @@ class ProjectedGradProbeLAT(LATBaseClass):
 def eval_and_log(result, epoch):
     wandb.log(result)
 
+if adversary_loss == "output":
+    adv_loss_coefs = {"towards": 1, "away": 0}
+elif adversary_loss == "probe":
+    adv_loss_coefs = {"harmful": 1, "benign": 0}
+
+print(f"Since {adversary_loss=}, {adv_loss_coefs=}")
+
 pgd_trainer = ProjectedGradProbeLAT(
     model=model,  # model
     probe_dict=probe_dict,
     dataloader=probing_dataloader,  # dataloader for lat
     sft_dataloader=sft_dataloader,  # dataloader for supervised finetuning
     # adv_loss_coefs={"towards": 1, "away": 0},
-    adv_loss_coefs={"towards": 1, "away": 0},
+    adv_loss_coefs=adv_loss_coefs,
     def_loss_coefs={"benign": 1, "harmful": 1, "sft": 1 if use_sft else 0},  # model's loss coefs
     pgd_layers=pgd_layers,  # what layers to attack
     model_layers=layers_to_transform,  # what layers to train
@@ -1263,7 +1276,7 @@ pgd_trainer = ProjectedGradProbeLAT(
     pgd_iterations_per_step=pgd_iterations,  # how many steps of projected gradient descent to do
     model_iterations_per_step=4,  # how many times to train on each step
     num_steps=num_steps,  # number of epochs
-    max_batch_per_acc=2,  # max size of a minibatch
+    max_batch_per_acc=1 if train_mt else 2,  # max size of a minibatch
     model_layers_module="base_model.model.model.layers",  # where the model layers are
     reinitialize_dev_optim=True,
     only_train_lora=True,
@@ -1312,9 +1325,9 @@ api.upload_folder(
 if args.eval_pretrained_probes:
     print("Evaluating pretrained probes")
     from eval_harmful_probes import *
-    all_prompts = load_data(model_type=model_type, tokenizer=tokenizer, eval_only=True)
+    all_prompts, in_distribution_formal_names, out_distribution_formal_names = load_data(model_type=model_type, tokenizer=tokenizer, eval_only=True)
     print(all_prompts.keys())
     all_caches, cache_ranges = get_acts_and_ranges(model=model, tokenizer=tokenizer, cache_layers=cache_layers, all_prompts=all_prompts, batch_size=12)
 
-    eval_pretrained_probe(probe_dict, caches=all_caches, non_mechanistic_layers=cache_layers, cache_type="output", cache_ranges=cache_ranges, save_dir=f"{save_name}/figures")
+    eval_pretrained_probe(probe_dict, caches=all_caches, non_mechanistic_layers=cache_layers, cache_type="output", cache_ranges=cache_ranges, save_dir=f"{save_name}/figures", in_distribution_formal_names=in_distribution_formal_names, out_distribution_formal_names=out_distribution_formal_names)
 

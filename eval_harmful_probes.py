@@ -18,7 +18,7 @@ from transformers import GPT2Tokenizer, GPTNeoXTokenizerFast, AutoModelForCausal
 from peft import PeftModel, AutoPeftModelForCausalLM, PeftConfig, get_peft_model
 
 
-def load_data(model_type, tokenizer, eval_only=True):
+def load_data(model_type, tokenizer, eval_only=True, abhay_jailbreaks=False, train_mt=False):
 
     def add_output_and_get_output_pos(prompt_list=None, output_list=None, tokenizer=tokenizer, dataset=None, first_n=None, assert_end_newline=False, add_space_between_output_and_input=False, remove_bos_token=True):
         # if dataset is not None:
@@ -56,22 +56,19 @@ def load_data(model_type, tokenizer, eval_only=True):
         return full_messages, end_input_positions
 
     add_space_between_output_and_input = False 
-
+    
     hf_dataset_path = f"PhillipGuo/{model_type}_prompt_completion_dataset"
 
-    benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_train")
-    # split into train and val
-    benign_train_dataset = benign_train_dataset.train_test_split(test_size=0.2, shuffle=False)
-    benign_train_dataset, benign_val_dataset = benign_train_dataset["train"], benign_train_dataset["test"]
     benign_test_dataset = load_dataset(hf_dataset_path, split="ultrachat_test")
-    xstest_dataset = load_dataset(hf_dataset_path, split="xstest")
-
-    circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train")
+    
+    if train_mt:
+        circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_mt_train")
+    else:
+        circuit_breakers_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_harmful_train")
     circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
     circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
     circuit_breakers_train_dataset = circuit_breakers_train_dataset.train_test_split(test_size=0.2, shuffle=False)
     circuit_breakers_train_dataset, circuit_breakers_test_dataset = circuit_breakers_train_dataset["train"], circuit_breakers_train_dataset["test"]
-    circuit_breakers_refusal_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_refusal_train")
 
     mt_bench_dataset = load_dataset(hf_dataset_path, split="mt_bench")
     or_bench_dataset = load_dataset(hf_dataset_path, split="or_bench")
@@ -83,54 +80,131 @@ def load_data(model_type, tokenizer, eval_only=True):
 
     all_prompts = {}
 
-    all_prompts["ultrachat_val"] = add_output_and_get_output_pos(dataset=benign_val_dataset, first_n=n_val_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
     all_prompts["ultrachat_test"] = add_output_and_get_output_pos(dataset=benign_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
-    all_prompts["xstest"] = add_output_and_get_output_pos(dataset=xstest_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
     all_prompts["circuit_breakers_test"] = add_output_and_get_output_pos(dataset=circuit_breakers_test_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
     if not eval_only:
+        if train_mt:
+            benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_mt_train")
+            or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_mt_train")
+        else:
+            benign_train_dataset = load_dataset(hf_dataset_path, split="ultrachat_train")
+            or_bench_train_dataset = load_dataset(hf_dataset_path, split="or_bench_train")
+        # split into train and val
+        benign_train_dataset = benign_train_dataset.train_test_split(test_size=0.2, shuffle=False)
+        benign_train_dataset, benign_val_dataset = benign_train_dataset["train"], benign_train_dataset["test"]
+        all_prompts["ultrachat_val"] = add_output_and_get_output_pos(dataset=benign_val_dataset, first_n=n_val_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
+
+        xstest_dataset = load_dataset(hf_dataset_path, split="xstest")
+        all_prompts["xstest"] = add_output_and_get_output_pos(dataset=xstest_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
+
         all_prompts["ultrachat_train"] = add_output_and_get_output_pos(dataset=benign_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
         all_prompts["circuit_breakers_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
+        circuit_breakers_refusal_train_dataset = load_dataset(hf_dataset_path, split="circuit_breakers_refusal_train")
         all_prompts["circuit_breakers_refusal_train"] = add_output_and_get_output_pos(dataset=circuit_breakers_refusal_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
+
+        all_prompts["or_bench_train"] = add_output_and_get_output_pos(dataset=or_bench_train_dataset, first_n=n_train_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
 
     all_prompts["mt_bench"] = add_output_and_get_output_pos(dataset=mt_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
     all_prompts["or_bench"] = add_output_and_get_output_pos(dataset=or_bench_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
     all_prompts["wildchat"] = add_output_and_get_output_pos(dataset=wildchat_dataset, first_n=n_test_prompts, add_space_between_output_and_input=add_space_between_output_and_input)
 
+    in_distribution_formal_names = {
+        "ultrachat_test": "UltraChat",
+        "wildchat": "WildChat",
+        "mt_bench": "MT Bench",
+        "or_bench": "OR Bench",
+    }
 
+    if abhay_jailbreaks:
+        # test_attacks = {"GCG": "harmful_gcg", "Human_Multiturn": "harmful_human_mt", "MSJ": "harmful_msj", "PAIR": "harmful_pair", "AutoDAN": "harmful_autodan", "Prefill":"harmful_prefill", "DirectRequest": "harmful_instructions_test"}
+        test_attacks = {"GCG": "harmful_gcg", "Human_Multiturn": "harmful_human_mt", "PAIR": "harmful_pair", "AutoDAN": "harmful_autodan", "DirectRequest": "DirectRequest", "TAP_Transfer": "TAP_T", "HumanJailbreaks": "HumanJailbreaks"}
+        attack_test_val_split = {"GCG": False, "Human_Multiturn": False, "PAIR": False, "AutoDAN": False, "DirectRequest": False, "TAP_Transfer": False, "HumanJailbreaks": False}
 
-    test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
-    attack_test_val_split = {"GCG": False, "GCG_T": False, "TAP_T": False, "HumanJailbreaks": False, "DirectRequest": False}
+        attack_hf_dataset_path = "Mechanistic-Anomaly-Detection/llama3-jailbreaks"
+        dataset_path_dict = {
+            "GCG": attack_hf_dataset_path,
+            "Human_Multiturn": attack_hf_dataset_path,
+            "PAIR": attack_hf_dataset_path,
+            "AutoDAN": attack_hf_dataset_path,
+            "DirectRequest": hf_dataset_path,
+            "TAP_Transfer": hf_dataset_path,
+            "HumanJailbreaks": hf_dataset_path,
+        }
 
-    attack_datasets = {}
-    for attack_name in test_attacks:
-        attack_datasets[attack_name] = load_dataset(hf_dataset_path, split=f"{attack_name}")
+        attack_datasets = {}
+        for attack_name in test_attacks:
+            attack_datasets[attack_name] = load_dataset(dataset_path_dict[attack_name], split=f"{test_attacks[attack_name]}")
 
-    for attack_name in test_attacks:
-        prompts, end_input_positions = add_output_and_get_output_pos(dataset=attack_datasets[attack_name], add_space_between_output_and_input=add_space_between_output_and_input)
-        if attack_test_val_split[attack_name]:
-            # 50-50 split
-            n_test_prompts = len(prompts) // 2
-            # first n_test_prompts are test, next n_test_prompts are val
-            all_prompts[f"{attack_name}_test"] = (prompts[:n_test_prompts], end_input_positions[:n_test_prompts])
-            all_prompts[f"{attack_name}_val"] = (prompts[n_test_prompts:], end_input_positions[n_test_prompts:])
-        else:
-            all_prompts[f"{attack_name}_test"] = (prompts, end_input_positions)
+        for attack_name in test_attacks:
+            prompts, end_input_positions = add_output_and_get_output_pos(dataset=attack_datasets[attack_name], add_space_between_output_and_input=add_space_between_output_and_input)
+            if attack_test_val_split[attack_name]:
+                # 50-50 split
+                n_test_prompts = len(prompts) // 2
+                # first n_test_prompts are test, next n_test_prompts are val
+                all_prompts[f"{attack_name}_test"] = (prompts[:n_test_prompts], end_input_positions[:n_test_prompts])
+                all_prompts[f"{attack_name}_val"] = (prompts[n_test_prompts:], end_input_positions[n_test_prompts:])
+            else:
+                all_prompts[f"{attack_name}_test"] = (prompts, end_input_positions)
+        
+        # test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
+        out_distribution_formal_names = {
+            "GCG_test": "GCG",
+            "Human_Multiturn_test": "Human Multiturn",
+            # "MSJ_test": "MSJ",
+            "AutoDAN_test": "AutoDAN",
+            "PAIR_test": "PAIR",
+            # "Prefill_test": "Prefill",
+            "DirectRequest_test": "Direct Request",
+            "TAP_Transfer_test": "TAP Transfer",
+            "HumanJailbreaks_test": "Human Jailbreaks",
+            "circuit_breakers_test": "Circuit Breakers Test",
+        }
+
+    else:
+        test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
+        attack_test_val_split = {"GCG": False, "GCG_T": False, "TAP_T": False, "HumanJailbreaks": False, "DirectRequest": False}
+
+        attack_datasets = {}
+        for attack_name in test_attacks:
+            attack_datasets[attack_name] = load_dataset(hf_dataset_path, split=f"{attack_name}")
+
+        for attack_name in test_attacks:
+            prompts, end_input_positions = add_output_and_get_output_pos(dataset=attack_datasets[attack_name], add_space_between_output_and_input=add_space_between_output_and_input)
+            if attack_test_val_split[attack_name]:
+                # 50-50 split
+                n_test_prompts = len(prompts) // 2
+                # first n_test_prompts are test, next n_test_prompts are val
+                all_prompts[f"{attack_name}_test"] = (prompts[:n_test_prompts], end_input_positions[:n_test_prompts])
+                all_prompts[f"{attack_name}_val"] = (prompts[n_test_prompts:], end_input_positions[n_test_prompts:])
+            else:
+                all_prompts[f"{attack_name}_test"] = (prompts, end_input_positions)
+        
+        # test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
+        out_distribution_formal_names = {
+            "GCG_test": "GCG",
+            "GCG_T_test": "GCG Transfer",
+            "TAP_T_test": "TAP Transfer",
+            "HumanJailbreaks_test": "Human Jailbreaks",
+            "DirectRequest_test": "Direct Request",
+            "circuit_breakers_test": "Circuit Breakers Test",
+        }
+
 
     if not eval_only:
-        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
-        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
+        benign_train_prompts = all_prompts["ultrachat_train"][0] + all_prompts["xstest"][0] + all_prompts["or_bench_train"][0]# + all_prompts["circuit_breakers_refusal_train"][0]
+        benign_train_end_input_positions = all_prompts["ultrachat_train"][1] + all_prompts["xstest"][1] + all_prompts["or_bench_train"][1]# + all_prompts["circuit_breakers_refusal_train"][1]
 
-        sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
-        benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
-        benign_train_end_input_positions = [benign_train_end_input_positions[i] for i in sample_indices]
+        # sample_indices = np.random.choice(len(benign_train_prompts), n_train_prompts, replace=False)
+        # benign_train_prompts = [benign_train_prompts[i] for i in sample_indices]
+        # benign_train_end_input_positions = [benign_train_end_input_positions[i] for i in sample_indices]
 
         all_prompts["benign_train"] = (benign_train_prompts, benign_train_end_input_positions)
 
-    return all_prompts
+    return all_prompts, in_distribution_formal_names, out_distribution_formal_names
 
 
 def get_seq_pos_list(prompt_list, tokenizer, n_input_pos=None, n_output_pos=None, input_interval=None, output_interval=None, get_full_seq_pos_list=False, assert_end_newline=False):
@@ -252,9 +326,9 @@ def get_acts_and_ranges(model, tokenizer, cache_layers, all_prompts, batch_size=
 
         return cache
 
-    whitelist = ["benign_train", "circuit_breakers_train", "ultrachat_test", "wildchat", "mt_bench", "or_bench", "GCG_test", "GCG_T_test", "TAP_T_test", "HumanJailbreaks_test", "DirectRequest_test", "circuit_breakers_test"]
+    # whitelist = ["benign_train", "circuit_breakers_train", "ultrachat_test", "wildchat", "mt_bench", "or_bench", "GCG_test", "GCG_T_test", "TAP_T_test", "HumanJailbreaks_test", "DirectRequest_test", "circuit_breakers_test"]
     model.cuda()
-    temp_attack_batches = {"HumanJailbreaks_test": batch_size//8, "human_mt": batch_size//8, "mt_bench": batch_size//8, "wildchat": batch_size//3}
+    temp_attack_batches = {"HumanJailbreaks_test": batch_size//8, "human_mt": batch_size//8, "mt_bench": batch_size//8, "wildchat": batch_size//3, "MSJ_test": batch_size//8, "Prefill_test": batch_size//3, "Human_Multiturn_test": batch_size//8}
     attack_batches = {}
     for attack_name in temp_attack_batches:
         attack_batches[attack_name] = temp_attack_batches[attack_name]
@@ -263,8 +337,8 @@ def get_acts_and_ranges(model, tokenizer, cache_layers, all_prompts, batch_size=
     # harmbench_cache = {}
     all_caches = {}
     for dataset_name in all_prompts:
-        if dataset_name not in whitelist:
-            continue
+        # if dataset_name not in whitelist:
+        #     continue
         print(f"Retrieving cache for {dataset_name}")
         if dataset_name in attack_batches:
             all_caches[dataset_name] = retrieve_acts_and_update_cache_ranges(all_prompts[dataset_name], dataset_name, attack_batches[dataset_name])
@@ -298,7 +372,7 @@ def calculate_and_plot_aurocs(in_distribution_sets, out_distribution_sets, plot=
         fig, axes = plt.subplots(1, len(in_distribution_sets), figsize=(6*len(in_distribution_sets), 6))
     for idx, (in_distribution_name, in_distribution_set) in enumerate(in_distribution_sets.items()):
         if plot:
-            ax = axes[idx]
+            ax = axes[idx] if len(in_distribution_sets) > 1 else axes
         roc_aucs[in_distribution_name] = {}
         for out_distribution_name, out_distribution_set in out_distribution_sets.items():
             if anomaly_higher:
@@ -308,20 +382,23 @@ def calculate_and_plot_aurocs(in_distribution_sets, out_distribution_sets, plot=
             roc_aucs[in_distribution_name][out_distribution_name] = roc_auc
             if plot:
                 ax.plot(fpr, tpr, label=f"{out_distribution_name} (AUC = {roc_auc:.3f})")
+        
+        # Calculate average AUROC for this in-distribution set
+        avg_auroc = sum(roc_aucs[in_distribution_name].values()) / len(roc_aucs[in_distribution_name])
+        
         if plot:
             ax.plot([0, 1], [0, 1], 'k--')  # diagonal line
             ax.set_xlim([0.0, 1.0])
             ax.set_ylim([0.0, 1.05])
             ax.set_xlabel('False Positive Rate')
             ax.set_ylabel('True Positive Rate')
-            ax.set_title(f'In-distribution: {in_distribution_name}')
+            ax.set_title(f'In-distribution: {in_distribution_name}\nAve AUROC: {avg_auroc:.3f}')
             ax.legend(loc="lower right")
             ax.grid(True, linestyle='--', alpha=0.7)
     
     if plot:
         return roc_aucs, fig
     return roc_aucs
-
 def get_accuracy_at_fpr(benign_probs, harmful_probs, fpr=None, anomaly_higher=True):
     """
     Get the accuracy at predicting harmful prompts at a given FPR. Get the probability threshold using the threshold on benign prompts that achieves the given FPR.
@@ -481,21 +558,22 @@ def flatten_cache(cache, cache_type, cache_name, cache_is_tensor=False, cat_with
                 all_cache.append(x[cache_range[i]])
         return all_cache
     
-in_distribution_formal_names = {
-    "ultrachat_test": "UltraChat",
-    "wildchat": "WildChat",
-    "mt_bench": "MT Bench",
-    "or_bench": "OR Bench",
-}
-# test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
-out_distribution_formal_names = {
-    "GCG_test": "GCG",
-    "GCG_T_test": "GCG Transfer",
-    "TAP_T_test": "TAP Transfer",
-    "HumanJailbreaks_test": "Human Jailbreaks",
-    "DirectRequest_test": "Direct Request",
-    "circuit_breakers_test": "Circuit Breakers Test",
-}
+# in_distribution_formal_names = {
+#     "ultrachat_test": "UltraChat",
+#     "wildchat": "WildChat",
+#     "mt_bench": "MT Bench",
+#     "or_bench": "OR Bench",
+# }
+
+# # test_attacks = ["GCG", "GCG_T", "TAP_T", "HumanJailbreaks", "DirectRequest"]
+# out_distribution_formal_names = {
+#     "GCG_test": "GCG",
+#     "GCG_T_test": "GCG Transfer",
+#     "TAP_T_test": "TAP Transfer",
+#     "HumanJailbreaks_test": "Human Jailbreaks",
+#     "DirectRequest_test": "Direct Request",
+#     "circuit_breakers_test": "Circuit Breakers Test",
+# }
 
 
 
@@ -577,7 +655,7 @@ def predict_aggregate_pretrained_probe(mlp_probes, caches, indices, cache_type, 
         # all_index_logprobs[sample_idx] = torch.stack(all_index_logprobs[sample_idx], dim=0) # shape num_indices x seq_len
     return list_index_logprobs
 
-def eval_pretrained_probe(pretrained_probes, caches, non_mechanistic_layers, cache_type, cache_ranges, in_distribution_formal_names=in_distribution_formal_names, out_distribution_formal_names=out_distribution_formal_names, pretrained_probe_type="linear", save_dir=None):
+def eval_pretrained_probe(pretrained_probes, caches, non_mechanistic_layers, cache_type, cache_ranges, in_distribution_formal_names, out_distribution_formal_names, pretrained_probe_type="linear", save_dir=None):
     in_distribution_probe_scores = {
         name: predict_aggregate_pretrained_probe(mlp_probes=pretrained_probes, caches=caches[name], indices=non_mechanistic_layers, cache_type=cache_type, cache_name=name, use_logprobs=True, on_cuda=True, batch_size=256, cache_ranges=cache_ranges) for name in in_distribution_formal_names
     }
@@ -586,7 +664,7 @@ def eval_pretrained_probe(pretrained_probes, caches, non_mechanistic_layers, cac
     }
 
     # probe = pretrained_probes[non_mechanistic_layer]
-    for aggregation_method_temp in ["max", "log_softmax", "vickrey_k"]:
+    for aggregation_method_temp in ["max", "mean", "log_softmax", "vickrey_k"]:
         if aggregation_method_temp == "vickrey_k":
             aggregation_method = "vickrey"
             aggregation_kwargs = {"vickrey_k": 10}
@@ -619,3 +697,101 @@ def eval_pretrained_probe(pretrained_probes, caches, non_mechanistic_layers, cac
         # plt.show()
 
 # def evaluate_pretrained_model(save_dir, model_type, model, probe_dict):
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--save_name", type=str, default=None)
+    parser.add_argument("--model_type", type=str, default="llama3_8b")
+    parser.add_argument("--model_name_or_path", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
+    parser.add_argument("--probe_type", type=str, default="linear")
+    parser.add_argument("--sequence_cache_type", type=str, default="output")
+    parser.add_argument("--cache_layers", type=str, default="10,20,31")
+    parser.add_argument("--abhay_jailbreaks", action="store_true")
+    args = parser.parse_args()
+
+    # load tokenizer and model and pretrained probes
+    model = AutoPeftModelForCausalLM.from_pretrained(args.save_name, torch_dtype=torch.bfloat16,          
+                low_cpu_mem_usage=True,
+                # attn_implementation="flash_attention_2",
+                device_map="cuda",
+                trust_remote_code=True,)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    class Config:
+        def __init__(self, n_layers, n_heads, d_model):
+            self.n_layers = n_layers
+            self.n_heads = n_heads
+            self.d_model = d_model
+
+    model.cfg = Config(n_layers=32, n_heads=32, d_model=4096)
+
+    cache_layers = args.cache_layers.split(",")
+    cache_layers = [int(layer) for layer in cache_layers]
+
+    class MLP(torch.nn.Module):
+        def __init__(self, input_size, hidden_size, output_size):
+            super().__init__()
+            self.fc1 = torch.nn.Linear(input_size, hidden_size)
+
+            # for 1 layer:
+            self.fc2 = torch.nn.Linear(hidden_size, output_size)
+
+            # # for 2 layers
+            # self.fc2 = torch.nn.Linear(hidden_size, hidden_size // 2)
+            # self.fc3 = torch.nn.Linear(hidden_size // 2, output_size)
+
+            self.relu = torch.nn.ReLU()
+
+        def forward(self, x):
+            x = self.relu(self.fc1(x))
+
+            # for 1 layer
+            return self.fc2(x)
+
+            # # for 2 layers
+            # x = self.relu(self.fc2(x))
+            # return self.fc3(x)
+
+    class Linear(torch.nn.Module):
+        def __init__(self, input_size, output_size):
+            super().__init__()
+            self.fc = torch.nn.Linear(input_size, output_size)
+
+        def forward(self, x):
+            return self.fc(x)
+
+
+    class Scale(torch.nn.Module):
+        def __init__(self, m, scale: float = 100):
+            super().__init__()
+            self.m = m
+            self.scale = torch.nn.Parameter(torch.tensor(1.0))
+
+        def forward(self, x):
+            return self.m(x) * self.scale
+
+    def zero_init(m):
+        # if isinstance(m, torch.nn.Linear):
+        #     m.weight.data.zero_()
+        #     if m.bias is not None:
+        #         m.bias.data.zero_()
+        for name, p in m.named_parameters():
+            p.data.zero_()
+        return m
+    pretrained_probes = torch.load(os.path.join(args.save_name, "probe_dict.pt")) 
+
+    for layer in cache_layers:
+        pretrained_probes[layer].cuda()
+
+    cache_type = args.sequence_cache_type
+
+    print("Getting caches")
+    all_prompts, in_distribution_formal_names, out_distribution_formal_names = load_data(model_type=args.model_type, tokenizer=tokenizer, eval_only=True, abhay_jailbreaks=args.abhay_jailbreaks)
+    print(all_prompts.keys())
+    all_caches, cache_ranges = get_acts_and_ranges(model=model, tokenizer=tokenizer, cache_layers=cache_layers, all_prompts=all_prompts, batch_size=12)
+
+    print("Evaluating pretrained probes")
+    eval_pretrained_probe(pretrained_probes, caches=all_caches, non_mechanistic_layers=cache_layers, cache_type=cache_type, cache_ranges=cache_ranges, save_dir=f"{args.save_name}/figures_{cache_type}_seq_eval{'_abhay' if args.abhay_jailbreaks else ''}", in_distribution_formal_names=in_distribution_formal_names, out_distribution_formal_names=out_distribution_formal_names)

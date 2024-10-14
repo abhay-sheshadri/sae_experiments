@@ -58,5 +58,3 @@ for pgd_layers in "${pgd_layers_options[@]}"; do
 done
 
 echo "All jobs submitted"
-
-# python lora_train_model.py --use_sft --attack_seq="input" --adversary_loss="output" --pgd_iterations=32 --pgd_layers="4,8,12,16,20" --num_steps=150 --epsilon=0.3 --train_mt --eval_pretrained_probes

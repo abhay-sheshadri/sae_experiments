@@ -25,3 +25,4 @@ full_input_output_cache_llama3_8b_lora_trained_mlp
 full_input_output_cache*
 lora_train_llama3_8b*/
 scripts/
+lora_llama3_8b_*

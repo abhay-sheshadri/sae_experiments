@@ -10,6 +10,7 @@ class DetectorObfuscator:
         detector: cup.detectors.AnomalyDetector,
         activation_matching_layers: list[int],
         detector_lr: float = 1e-3,
+        mahalanobis_shrinkage: float = 0.0,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -17,6 +18,7 @@ class DetectorObfuscator:
         self.detector_lr = detector_lr
         self.activation_matching_layers = activation_matching_layers
         self.initialized_detector_variables = False
+        self.mahalanobis_shrinkage = mahalanobis_shrinkage
         if isinstance(self.detector, cup.detectors.FeatureModelDetector):
             self.detector_opt = torch.optim.Adam(
                 self.detector.module.parameters(), lr=detector_lr
@@ -31,7 +33,7 @@ class DetectorObfuscator:
             with torch.no_grad():
                 self.detector.batch_update(clean_activations, case="trusted")
                 # TODO: this is extremely inefficient, it calls pinv every batch
-                self.detector._finalize_training()
+                self.detector._finalize_training(shrinkage=self.mahalanobis_shrinkage)
                 return None
 
         elif isinstance(self.detector, cup.detectors.FeatureModelDetector):
@@ -65,31 +67,39 @@ class DetectorObfuscator:
         self._initialized_detector_variables = True
 
     def compute_obfuscation_loss(self, backdoored_batch, normal_benign_batch):
-        backdoored_tokens, *_ = [x.to(self.model.device) for x in backdoored_batch]
-        normal_benign_tokens, *_ = [
+        backdoored_tokens, backdoor_prompt_mask, _ = [
+            x.to(self.model.device) for x in backdoored_batch
+        ]
+        normal_benign_tokens, normal_benign_prompt_mask, _ = [
             x.to(self.model.device) for x in normal_benign_batch
         ]
 
-        # Create masks for non-padding tokens
-        backdoored_mask = (backdoored_tokens != self.tokenizer.pad_token_id)[:, :-1]
-        normal_benign_mask = (normal_benign_tokens != self.tokenizer.pad_token_id)[
-            :, :-1
-        ]
+        assert backdoored_tokens.shape == backdoor_prompt_mask.shape
+        assert normal_benign_tokens.shape == normal_benign_prompt_mask.shape
+
+        normal_last_token_indices = normal_benign_prompt_mask.sum(dim=1) - 1
+        backdoored_last_token_indices = backdoor_prompt_mask.sum(dim=1) - 1
+
+        normal_max_prompt_length = normal_last_token_indices.max().item() + 1
+        backdoored_max_prompt_length = backdoored_last_token_indices.max().item() + 1
 
         with torch.no_grad():
             normal_benign_output = self.model(
-                input_ids=normal_benign_tokens[:, :-1], output_hidden_states=True
+                input_ids=normal_benign_tokens[:, :normal_max_prompt_length],
+                output_hidden_states=True,
             )
 
+        # Get activations on the last prompt token for each sample
         clean_activations = {
             f"layer{layer}": normal_benign_output.hidden_states[layer][
-                normal_benign_mask
+                torch.arange(normal_benign_output.hidden_states[layer].shape[0]),
+                normal_last_token_indices,
             ]
             for layer in self.activation_matching_layers
         }
 
         if not self.initialized_detector_variables:
-            self._init_detector_variables((_, clean_activations))
+            self._init_detector_variables((None, clean_activations))
             self.initialized_detector_variables = True
 
         detector_loss = self._compute_detector_loss(None, clean_activations)
@@ -99,11 +109,15 @@ class DetectorObfuscator:
             self.detector_opt.step()
 
         backdoored_output = self.model(
-            input_ids=backdoored_tokens[:, :-1], output_hidden_states=True
+            input_ids=backdoored_tokens[:, :backdoored_max_prompt_length],
+            output_hidden_states=True,
         )
 
         backdoored_activations = {
-            f"layer{layer}": backdoored_output.hidden_states[layer][backdoored_mask]
+            f"layer{layer}": backdoored_output.hidden_states[layer][
+                torch.arange(backdoored_output.hidden_states[layer].shape[0]),
+                backdoored_last_token_indices,
+            ]
             for layer in self.activation_matching_layers
         }
 

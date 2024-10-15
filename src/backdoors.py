@@ -39,6 +39,7 @@ def train_backdoor(
     dataset_name=None,
     backdoor_type="lora",
     wandb_project=None,
+    mahalanobis_shrinkage=0.1,
 ):
     lora_model = initialize_lora_adapter(
         encoder, [encoder.model.config.num_hidden_layers], lora_params
@@ -196,6 +197,7 @@ def train_backdoor(
                             n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis)
                         )
                         == 0,
+                        mahalanobis_shrinkage=mahalanobis_shrinkage,
                     )
 
                 avg_losses = {
@@ -430,6 +432,7 @@ def evaluate_backdoor(
     device,
     ds_normal_benign_train,
     mahalanobis=False,
+    mahalanobis_shrinkage=0.1,
     inference_batch_size=16,
     training_batch_size=2,
 ):
@@ -520,17 +523,23 @@ def evaluate_backdoor(
             individual_processing_fn=cup_model.make_last_token_hook(),
         )
 
-        detector.train(task, batch_size=training_batch_size)
-        detector_results, detector_figs = detector.eval(task, batch_size=training_batch_size, layerwise=True)
+        detector.train(
+            task, batch_size=training_batch_size, shrinkage=mahalanobis_shrinkage
+        )
+        detector_results, detector_figs = detector.eval(
+            task, batch_size=training_batch_size, layerwise=True
+        )
 
         for layer in detector_results:
             for metric in detector_results[layer]:
-                eval_dict[f"mahalanobis/layer{layer}/{metric}"] = detector_results[layer][metric]
-        
-        for layer in detector_figs:
-            eval_dict[f"mahalanobis/layer{layer}/figure"] = wandb.Image(detector_figs[layer])
+                eval_dict[f"mahalanobis/layer{layer}/{metric}"] = detector_results[
+                    layer
+                ][metric]
 
-        
+        for layer in detector_figs:
+            eval_dict[f"mahalanobis/layer{layer}/figure"] = wandb.Image(
+                detector_figs[layer]
+            )
 
     print("Evaluation finished.")
     for key in eval_dict:

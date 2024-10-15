@@ -25,6 +25,7 @@ N_EVALS_PER_MAHALANOBIS = 1
 N_EVAL = 512
 EVAL_INFERENCE_BATCH_SIZE = 128
 EVAL_TRAINING_BATCH_SIZE = 32
+MAHALANOBIS_SHRINKAGE = 0.05
 DATASET_SUFFIX = (
     # "llama3-software-engineer-bio-backdoor"
     "llama3-short-generic-backdoor"
@@ -53,6 +54,7 @@ obfuscator = DetectorObfuscator(
     encoder.tokenizer,
     detector,
     ACTIVATION_MATCHING_LAYERS,
+    mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
 )
 
 
@@ -88,6 +90,7 @@ lora_model, wandb_run = train_backdoor(
     eval_inference_batch_size=EVAL_INFERENCE_BATCH_SIZE,
     eval_training_batch_size=EVAL_TRAINING_BATCH_SIZE,
     n_evals_per_mahalanobis=N_EVALS_PER_MAHALANOBIS,
+    mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
 )
 
 

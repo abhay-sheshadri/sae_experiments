@@ -3,7 +3,9 @@ from pathlib import Path
 import cupbearer as cup
 import torch
 import torch.nn.functional as F
-from datasets import DatasetDict
+from datasets import DatasetDict, concatenate_datasets
+import pandas as pd
+import time
 
 import wandb
 
@@ -40,6 +42,8 @@ def train_backdoor(
     backdoor_type="lora",
     wandb_project=None,
     mahalanobis_shrinkage=0.1,
+    eval_mahalanobis_on_harmful=False,
+    eval_mahalanobis_on_both=False,
 ):
     lora_model = initialize_lora_adapter(
         encoder, [encoder.model.config.num_hidden_layers], lora_params
@@ -141,12 +145,15 @@ def train_backdoor(
         )
         print(f"wandb_run.id = {wandb_run.id}")
 
+    t_forward = 0.0
+    t_backward = 0.0
     while keep_running_training:
         for i, (
             normal_benign_batch,
             normal_harmful_batch,
             backdoored_batch,
         ) in enumerate(zip(*dataloaders)):
+            t0 = time.time()
             total_steps += 1
 
             losses = process_step(
@@ -162,6 +169,8 @@ def train_backdoor(
                 obfuscation_loss_weight,
                 n_grad_accum,
             )
+            
+            t1 = time.time()
 
             for key in total_losses:
                 total_losses[key] += losses[key]
@@ -174,13 +183,17 @@ def train_backdoor(
                     )
                 optimizer.step()
                 optimizer.zero_grad()
+            t2 = time.time()
 
+            t_forward += t1 - t0
+            t_backward += t2 - t1
             # total_steps - 1 so that we run the first logging step immediately
             # (and get a baseline very close to initialization).
             # This also catches any errors in the eval loop more quickly.
             # Also log the final step even if we don't hit the logging frequency.
             if (total_steps - 1) % n_steps_per_logging == 0 or total_steps >= n_steps:
                 if n_loggings % n_loggings_per_eval == 0:
+                    mahalanobis_step = (n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis))== 0
                     # Validation metrics
                     eval_dict = evaluate_backdoor(
                         lora_model,
@@ -190,13 +203,13 @@ def train_backdoor(
                         ds_backdoor_eval,
                         activation_matching_layers,
                         device,
+                        ds_normal_benign,
+                        ds_normal_harmful,
                         inference_batch_size=eval_inference_batch_size,
                         training_batch_size=eval_training_batch_size,
-                        ds_normal_benign_train=ds_normal_benign,
-                        mahalanobis=(
-                            n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis)
-                        )
-                        == 0,
+                        mahalanobis=mahalanobis_step,
+                        mahalanobis_on_harmful=eval_mahalanobis_on_harmful and mahalanobis_step,
+                        mahalanobis_on_both=eval_mahalanobis_on_both and mahalanobis_step,
                         mahalanobis_shrinkage=mahalanobis_shrinkage,
                     )
 
@@ -223,6 +236,8 @@ def train_backdoor(
                                 "obfuscation_loss": avg_losses["obfuscation"],
                                 "step": total_steps,
                                 "progress": total_steps / n_steps,
+                                "time_per_step_forward": t_forward/steps_since_last_logging,
+                                "time_per_step_backward": t_backward/steps_since_last_logging,
                             },
                             **eval_dict,
                         },
@@ -231,6 +246,8 @@ def train_backdoor(
                     print(f"Logged to wandb at step {total_steps}.")
 
                 total_losses = {k: 0 for k in total_losses}
+                t_forward = 0.0
+                t_backward = 0.0
                 steps_since_last_logging = 0
                 n_loggings += 1
 
@@ -431,7 +448,10 @@ def evaluate_backdoor(
     activation_matching_layers,
     device,
     ds_normal_benign_train,
+    ds_normal_harmful_train,
     mahalanobis=False,
+    mahalanobis_on_harmful=False,
+    mahalanobis_on_both=False,
     mahalanobis_shrinkage=0.1,
     inference_batch_size=16,
     training_batch_size=2,
@@ -439,7 +459,9 @@ def evaluate_backdoor(
     model.eval()
     eval_dict = {}
     print("Evaluating the backdoor:")
+    t0 = time.time()
 
+    # Do string-matching on completions as a cheap metric of backdoor performance
     with torch.no_grad():
         ds_eval = DatasetDict(
             {
@@ -484,64 +506,136 @@ def evaluate_backdoor(
             + (1.0 - eval_dict["normal_harmful_im_sorry_proportion"])
         ) / 3.0
 
+
+        # Generate a few full completions for inspection
+        ds_eval_tiny = DatasetDict(
+            {
+                "normal_benign": ds_normal_benign_eval.select(range(10)),
+                "normal_harmful": ds_normal_harmful_eval.select(range(10)),
+                "backdoor": ds_backdoor_eval.select(range(10)),
+            }
+        )
+        ds_eval_completed_tiny = dataset_generate_completions(
+            ds_eval_tiny, model, tokenizer, inference_batch_size, max_new_tokens=100
+        )
+        # log to wandb as a table of prompts and completions
+        for key in ds_eval_completed_tiny:
+            eval_dict[f"completions/{key}"] = wandb.Table(dataframe=pd.DataFrame(ds_eval_completed_tiny[key]))
+
+    t1 = time.time()
+    # Evaluate against a Mahalanobis detector
     if mahalanobis:
 
         def make_dataset(hf_dataset):
             return cup.data.HuggingfaceDataset(
                 hf_dataset, text_key="prompt", label_key="completion"
             )
+        
+        def mahalanobis_eval(trusted_data, clean_test_data, anomalous_test_data):
+            nonlocal activation_matching_layers, model, tokenizer, device, training_batch_size, mahalanobis_shrinkage
 
-        cup_model = cup.models.HuggingfaceLM(
-            tokenizer=tokenizer, model=model, device=device
+            cup_model = cup.models.HuggingfaceLM(
+                tokenizer=tokenizer, model=model, device=device
+            )
+            cup_model.eval()
+
+            task = cup.tasks.Task.from_separate_data(
+                model=cup_model,
+                trusted_data=trusted_data,
+                clean_test_data=clean_test_data,
+                anomalous_test_data=anomalous_test_data,
+            )
+
+            activation_names = []
+            for i in activation_matching_layers:
+                # The HF outputs start with the embeddings at index 0, which correspond
+                # to the input of the first attention layernorm.
+                # But they have one extra entry at the end, which is the output of the
+                # final pre-unembed layer norm.
+                # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
+                # and following lines.
+                if i == 32:
+                    activation_names.append("hf_model.base_model.model.model.norm.output")
+                else:
+                    activation_names.append(
+                        f"hf_model.base_model.model.model.layers.{i}.input_layernorm.input"
+                    )
+
+            detector = cup.detectors.MahalanobisDetector(
+                activation_names=activation_names,
+                individual_processing_fn=cup_model.make_last_token_hook(),
+            )
+
+            detector.train(
+                task, batch_size=training_batch_size, shrinkage=mahalanobis_shrinkage
+            )
+            detector_results, detector_figs = detector.eval(
+                task, batch_size=training_batch_size, layerwise=True
+            )
+            return detector_results, detector_figs
+
+        # By default we only use the benign data for training the Mahalanobis detector
+        trusted_benign=make_dataset(ds_normal_benign_train.select(range(1000)))
+        clean_test_data=make_dataset(ds_normal_benign_eval)
+        anomalous_test_data=make_dataset(ds_backdoor_eval)
+
+        detector_results, detector_figs = mahalanobis_eval(
+            trusted_benign, clean_test_data, anomalous_test_data
         )
-        cup_model.eval()
-
-        task = cup.tasks.Task.from_separate_data(
-            model=cup_model,
-            trusted_data=make_dataset(ds_normal_benign_train.select(range(1000))),
-            clean_test_data=make_dataset(ds_normal_benign_eval),
-            anomalous_test_data=make_dataset(ds_backdoor_eval),
-        )
-
-        activation_names = []
-        for i in activation_matching_layers:
-            # The HF outputs start with the embeddings at index 0, which correspond
-            # to the input of the first attention layernorm.
-            # But they have one extra entry at the end, which is the output of the
-            # final pre-unembed layer norm.
-            # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
-            # and following lines.
-            if i == 32:
-                activation_names.append("hf_model.base_model.model.model.norm.output")
-            else:
-                activation_names.append(
-                    f"hf_model.base_model.model.model.layers.{i}.input_layernorm.input"
-                )
-
-        detector = cup.detectors.MahalanobisDetector(
-            activation_names=activation_names,
-            individual_processing_fn=cup_model.make_last_token_hook(),
-        )
-
-        detector.train(
-            task, batch_size=training_batch_size, shrinkage=mahalanobis_shrinkage
-        )
-        detector_results, detector_figs = detector.eval(
-            task, batch_size=training_batch_size, layerwise=True
-        )
-
         for layer in detector_results:
             for metric in detector_results[layer]:
                 eval_dict[f"mahalanobis/layer{layer}/{metric}"] = detector_results[
                     layer
                 ][metric]
-
         for layer in detector_figs:
             eval_dict[f"mahalanobis/layer{layer}/figure"] = wandb.Image(
                 detector_figs[layer]
             )
 
-    print("Evaluation finished.")
+        # Optionally train a detector on harmful data
+        if mahalanobis_on_harmful:
+            trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(1000)))
+            detector_results, detector_figs = mahalanobis_eval(
+                trusted_harmful, clean_test_data, anomalous_test_data
+            )
+            for layer in detector_results:
+                for metric in detector_results[layer]:
+                    eval_dict[f"mahalanobis_harmful/layer{layer}/{metric}"] = detector_results[
+                        layer
+                    ][metric]
+            for layer in detector_figs:
+                eval_dict[f"mahalanobis_harmful/layer{layer}/figure"] = wandb.Image(
+                    detector_figs[layer]
+                )
+
+        # Optionally train a detector on harmful and harmless data
+        if mahalanobis_on_both:
+            trusted_both = make_dataset(
+                concatenate_datasets([
+                    ds_normal_harmful_train.select(range(500)),
+                    ds_normal_benign_train.select(range(500))
+                ]).shuffle()
+            )
+            detector_results, detector_figs = mahalanobis_eval(
+                trusted_both, clean_test_data, anomalous_test_data
+            )
+            for layer in detector_results:
+                for metric in detector_results[layer]:
+                    eval_dict[f"mahalanobis_both/layer{layer}/{metric}"] = detector_results[
+                        layer
+                    ][metric]
+            for layer in detector_figs:
+                eval_dict[f"mahalanobis_both/layer{layer}/figure"] = wandb.Image(
+                    detector_figs[layer]
+                )
+    t2 = time.time()
+
+            
+    tf = time.time()
+    eval_dict["evaluation_time"] = tf - t0
+    eval_dict["evaluation_time_string_matching"] = t1 - t0 
+    eval_dict["evaluation_time_mahalanobis"] = t2 - t1
+    print(f"Evaluation finished in {tf-t0}s.")
     for key in eval_dict:
         print(f"{key}: {eval_dict[key]}")
     model.train()

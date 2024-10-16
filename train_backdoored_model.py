@@ -1,17 +1,24 @@
-import cupbearer as cup
-from datasets import load_dataset
-import torch
-from transformers import logging as transformers_logging
 import warnings
 
-from src import *
+import torch
+from datasets import load_dataset
+from src.backdoors import train_backdoor
+from transformers import logging as transformers_logging
+from src.detector_obfuscator import DetectorObfuscator
+from src.obfuscation_loss_fns import (
+    compute_obfuscation_gan_loss,
+    compute_obfuscation_leace_loss,
+    compute_obfuscation_mmd_loss,
+    compute_obfuscation_mmd_nokernel_loss,
+)
+
+import cupbearer as cup
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", message="Setting `pad_token_id` to `eos_token_id`.*")
 
 # Or suppress all Transformers warnings
 transformers_logging.set_verbosity_error()
-from src.backdoors import *
 
 # Constants
 MODEL_TYPE = "llama3"
@@ -42,12 +49,8 @@ ONLY_OBFUSCATE_PROMPT = True
 # Loss coefficients
 loss_coefs = {
     "backdoored": 1,  # Cross entropy on backdoored completion
-    #"retain": 1.0,  # Cross entropy on normal completion
-    "obfuscation_leace": 10.0,  # LEACE loss between normal benign and backdoored activations
-    # "activation_change": 0.2,  # Difference in activation between normal activations with and without the model adapter
-    # "obfuscation_mmd": 0.0,  # MMD bWetween normal benign and backdoored activations
-    #"obfuscation_mmd_nokernel": 1.0,  # MMD between normal benign and backdoored activations without kernel
-    # "obfuscation_gan": 1.0,  # GAN loss between normal benign and backdoored activations
+    "retain": 1.0,  # Cross entropy on normal completion
+    "obfuscation": 10.0,  # Obfuscation loss between normal benign and backdoored activations
     "kl_change": 1,  # Difference in KL divergence between normal activations with and without the model adapter
 }
 
@@ -59,54 +62,53 @@ dataset_name = f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
 if model_type == "llama3":
     encoder = EleutherSparseAutoencoder.load_llama3_sae(None, instruct=True)
 elif model_type == "gemma2":
-    model = DeepmindSparseAutoencoder.load_gemma2_sae(None, 11)
+    encoder = DeepmindSparseAutoencoder.load_gemma2_sae(None, 11)
 else:
     raise ValueError("Unsupported model type")
 
+# Load the dataset
 dataset = load_dataset(dataset_name)
 
+
+# Set up the mahalanobis obfuscator
 detector = cup.detectors.MahalanobisDetector(
     activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
 )
-
 obfuscator = DetectorObfuscator(
-    encoder.model,
-    encoder.tokenizer,
     detector,
-    ACTIVATION_MATCHING_LAYERS,
     mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
 )
+def compute_mahalanobis_obfuscation_loss(
+        backdoor_data,
+        normal_benign_output,
+        activation_matching_layers
+    ):
+    global obfuscator
+    return obfuscator.compute_obfuscation_loss(
+        backdoor_data,
+        normal_benign_output,
+        activation_matching_layers
+        )
 
-
-def no_obfuscator(backdoored_batch, normal_benign_batch):
+def compute_no_obfuscation_loss(
+        backdoor_data,
+        normal_benign_output,
+        activation_matching_layers
+    ):
     return torch.tensor(0.0, device=DEVICE)
 
+# Other obfuscation loss functions include:
+# compute_obfuscation_mmd_loss
+# compute_obfuscation_mmd_nokernel_loss
+# compute_obfuscation_gan_loss
+# compute_obfuscation_leace_loss
 
-# Calculate the 99th percentile of backdoored input lengths
-backdoor_input_lengths = [len(ex.split()) for ex in backdoor_inputs]
-length_threshold = sorted(backdoor_input_lengths)[
-    int(0.99 * len(backdoor_input_lengths))
-]
 
-# Filter normal benign examples
-filtered_normal_benign = [
-    (inp, out)
-    for inp, out in zip(normal_benign_inputs, normal_benign_outputs)
-    if len(inp.split()) <= length_threshold
-]
-
-# Unpack the filtered results
-normal_benign_inputs, normal_benign_outputs = (
-    zip(*filtered_normal_benign) if filtered_normal_benign else ([], [])
-)
-
-print(f"Number of normal benign examples after filtering: {len(normal_benign_inputs)}")
-print(f"Length threshold (99th percentile of backdoored inputs): {length_threshold}")
 
 # Train the backdoor
 lora_model, wandb_run = train_backdoor(
     encoder,
-    obfuscator.compute_obfuscation_loss,
+    compute_mahalanobis_obfuscation_loss,
     dataset["normal_benign_train"],
     dataset["normal_harmful_train"],
     dataset["backdoored_train"],

@@ -1,21 +1,21 @@
-from collections import defaultdict
-import matplotlib.pyplot as plt
-import numpy as np
+import re
+import time
 from pathlib import Path
-import cupbearer as cup
+
+import matplotlib.pyplot as plt
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import wandb
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import (
     LinearDiscriminantAnalysis,
     QuadraticDiscriminantAnalysis,
 )
 from sklearn.metrics import roc_auc_score
-from datasets import DatasetDict, concatenate_datasets
-import pandas as pd
-import time
+
+import cupbearer as cup
 
 from .probing import initialize_lora_adapter
 from .utils import *
@@ -56,9 +56,8 @@ def train_backdoor(
     mahalanobis_shrinkage=0.1,
     eval_mahalanobis_on_harmful=False,
     eval_mahalanobis_on_both=False,
+    filter_out_inputs_above_percentile = 0.99
 ):
-    
-    # TODO: Evaluate the model before training
 
     lora_model = initialize_lora_adapter(
         encoder, [encoder.model.config.num_hidden_layers], lora_params
@@ -131,11 +130,18 @@ def train_backdoor(
     steps_since_last_logging = 0
     keep_running_training = True
     if wandb_project is not None:
+        obfuscation_method = obfuscation_loss_fn.__name__
+        obfuscation_method = obfuscation_method.replace('compute_','')
+        obfuscation_method = obfuscation_method.replace('obfuscation_','')
+        obfuscation_method = obfuscation_method.replace('_loss','')
+        print(f'obfuscation_method = {obfuscation_method}')
         wandb_run = wandb.init(
             # Set the project where this run will be logged
             project=wandb_project,
             # Track hyperparameters and run metadata
             config={
+                "obfuscation_method": obfuscation_method,
+                "loss_coefs": loss_coefs,
                 "model_lr": model_lr,
                 "n_steps": n_steps,
                 "n_steps_per_logging": n_steps_per_logging,
@@ -144,7 +150,6 @@ def train_backdoor(
                 "device": device,
                 "clip_grad_norm": clip_grad_norm,
                 "activation_matching_layers": activation_matching_layers,
-                "loss_coefs": loss_coefs,
                 "only_obfuscate_prompts": only_obfuscate_prompts,
                 "lora_params": lora_params,
                 "model_type": model_type,
@@ -233,20 +238,15 @@ def train_backdoor(
                         mahalanobis_on_both=eval_mahalanobis_on_both and mahalanobis_step,
                         mahalanobis_shrinkage=mahalanobis_shrinkage,
                     )
+                    for k, v in eval_dict.items():
+                        if isinstance(v, torch.Tensor) and len(v.shape) == 0:
+                            print(f"{k}: {v.item()}")
+                        if isinstance(v, float):
+                            print(f"{k}: {v}")
 
                 avg_losses = {
                     k: v / steps_since_last_logging for k, v in total_losses.items()
                 }
-
-                model_asrs = evaluate_backdoor(
-                    lora_model,
-                    encoder.tokenizer,
-                    normal_benign_inputs,
-                    normal_harmful_inputs,
-                    backdoor_inputs,
-                    total_steps
-                )
-                avg_losses.update(model_asrs)
 
                 print(
                     f"Step {total_steps}/{n_steps} | "
@@ -315,13 +315,13 @@ def process_step(
     only_obfuscate_prompts,
     n_grad_accum,
 ):
-    total_loss = 0
+    total_loss = torch.tensor(0.0, device=model.device)
     losses = {}
 
     # Compute forward passes for normal batches with and without adapter
     normal_batches = [normal_benign_batch, normal_harmful_batch]
-    normal_outputs = []
-    normal_outputs_no_adapter = []
+    normal_data = []
+    normal_data_no_adapter = []
 
     for batch in normal_batches:
         tokens, prompt_mask, target_mask = [x.to(model.device) for x in batch]
@@ -343,10 +343,10 @@ def process_step(
         # Compute output with adapter
         output_with_adapter = model(input_ids=tokens[:, :-1], output_hidden_states=True)
 
-        normal_outputs.append(
+        normal_data.append(
             (output_with_adapter, tokens, target_mask, non_padding_mask)
         )
-        normal_outputs_no_adapter.append(output_no_adapter)
+        normal_data_no_adapter.append(output_no_adapter)
 
     # Compute forward pass for backdoor batch only with adapter
     backdoor_tokens, backdoor_prompt_mask, backdoor_target_mask = [
@@ -359,7 +359,7 @@ def process_step(
     # backdoor_non_padding_mask = backdoor_non_padding_mask & (
     #     backdoor_tokens != tokenizer.bos_token_id
     # )[:, :-1]
-    
+
     backdoor_output = model(
         input_ids=backdoor_tokens[:, :-1], output_hidden_states=True
     )
@@ -373,24 +373,15 @@ def process_step(
     # Define loss functions
     loss_functions = {
         "backdoored": lambda: compute_backdoored_loss(backdoor_data, tokenizer),
-        "retain": lambda: compute_cross_entropy_change_loss(normal_outputs, tokenizer),
+        "retain": lambda: compute_cross_entropy_change_loss(normal_data, tokenizer),
         "kl_change": lambda: compute_kl_change_loss(
-            normal_outputs, normal_outputs_no_adapter
+            normal_data, normal_data_no_adapter
         ),
         "activation_change": lambda: compute_activation_change_loss(
-            normal_outputs, normal_outputs_no_adapter, activation_matching_layers
+            normal_data, normal_data_no_adapter, activation_matching_layers
         ),
-        "obfuscation_mmd": lambda: compute_obfuscation_mmd_loss(
-            backdoor_data, normal_outputs[0], activation_matching_layers
-        ),
-        "obfuscation_mmd_nokernel": lambda: compute_obfuscation_mmd_nokernel_loss(
-            backdoor_data, normal_outputs[0], activation_matching_layers
-        ),
-        "obfuscation_gan": lambda: compute_obfuscation_gan_loss(
-            backdoor_data, normal_outputs[0], activation_matching_layers
-        ),
-        "obfuscation_leace": lambda: compute_obfuscation_leace_loss(
-            backdoor_data, normal_outputs[0], activation_matching_layers
+        "obfuscation": lambda: obfuscation_loss_fn(
+            backdoor_data, normal_data[0], activation_matching_layers
         ),
     }
 
@@ -399,15 +390,15 @@ def process_step(
     for i, loss_name in enumerate(active_losses):
         loss = loss_functions[loss_name]()
         losses[loss_name] = loss.item()
-        total_loss += loss_coefs[loss_name] * loss.item()
+        total_loss += loss_coefs[loss_name] * loss
 
         # Scale the loss and backpropagate
-        scaled_loss = (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name]
+        scaled_loss = (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name] / n_grad_accum
         scaled_loss.backward(retain_graph=True)
 
-    losses["total"] = total_loss
-
+    losses["total"] = total_loss.item()
     return losses
+
 
 
 def compute_backdoored_loss(backdoor_data, tokenizer):
@@ -420,9 +411,9 @@ def compute_backdoored_loss(backdoor_data, tokenizer):
     )
 
 
-def compute_cross_entropy_change_loss(normal_outputs, tokenizer):
+def compute_cross_entropy_change_loss(normal_data, tokenizer):
     loss = 0
-    for output in normal_outputs:
+    for output in normal_data:
         output_with_adapter, tokens, target_mask, _ = output
         adapter_logits = output_with_adapter.logits
 
@@ -432,12 +423,12 @@ def compute_cross_entropy_change_loss(normal_outputs, tokenizer):
             ignore_index=tokenizer.pad_token_id,
         )
 
-    return loss / len(normal_outputs)
+    return loss / len(normal_data)
 
 
-def compute_kl_change_loss(normal_outputs, normal_outputs_no_adapter):
+def compute_kl_change_loss(normal_data, normal_data_no_adapter):
     loss = 0
-    for output, output_no_adapter in zip(normal_outputs, normal_outputs_no_adapter):
+    for output, output_no_adapter in zip(normal_data, normal_data_no_adapter):
         output_with_adapter, tokens, target_mask, _ = output
         adapter_logits = output_with_adapter.logits
         no_adapter_logits = output_no_adapter.logits
@@ -449,14 +440,14 @@ def compute_kl_change_loss(normal_outputs, normal_outputs_no_adapter):
             log_target=False,
         )
 
-    return loss / len(normal_outputs)
+    return loss / len(normal_data)
 
 
 def compute_activation_change_loss(
-    normal_outputs, normal_outputs_no_adapter, activation_matching_layers
+    normal_data, normal_data_no_adapter, activation_matching_layers
 ):
     loss = 0
-    for output, output_no_adapter in zip(normal_outputs, normal_outputs_no_adapter):
+    for output, output_no_adapter in zip(normal_data, normal_data_no_adapter):
         output_with_adapter, _, _, non_padding_mask = output
         for li in activation_matching_layers:
             lora_acts = output_with_adapter.hidden_states[li][non_padding_mask]
@@ -466,310 +457,7 @@ def compute_activation_change_loss(
             layer_loss = torch.norm(normalized_diff, dim=-1, p=2).mean()
             loss += layer_loss
 
-    return loss / (len(normal_outputs) * len(activation_matching_layers))
-
-def compute_obfuscation_mmd_loss(
-    backdoor_data,
-    normal_benign_output,
-    activation_matching_layers,
-    kernel_name="quadratic",
-    n_samples=65536,
-):
-    def gaussian_kernel(x, y, sigma=1.0):
-        dist = torch.norm(x - y, dim=-1, p=2)
-        return torch.exp(-sigma * (dist**2))
-
-    def laplacian_kernel(x, y, sigma=1.0):
-        dist = torch.norm(x - y, dim=-1, p=1)
-        return torch.exp(-sigma * dist)
-
-    def linear_kernel(x, y, c1=1.0, c2=0.0):
-        linear_term = torch.sum(x * y, dim=1)
-        return c1 * linear_term + c2
-
-    def quadratic_kernel(x, y, c1=1.0, c2=0.0):
-        linear_term = torch.sum(x * y, dim=1)
-        return (c1 * linear_term + c2) ** 2
-
-    if kernel_name == "gaussian":
-        kernel_fn = gaussian_kernel
-    elif kernel_name == "laplacian":
-        kernel_fn = laplacian_kernel
-    elif kernel_name == "linear":
-        kernel_fn = linear_kernel
-    elif kernel_name == "quadratic":
-        kernel_fn = quadratic_kernel
-    else:
-        raise ValueError("Unsupported kernel")
-
-    def mmd(x, x_prime, y, y_prime, kernel):
-        xx = kernel(x, x_prime)
-        xy = kernel(x, y)
-        xy2 = kernel(x_prime, y_prime)
-        yy = kernel(y, y_prime)
-        return xx.mean() + yy.mean() - xy.mean() - xy2.mean()
-
-    total_mmd = 0.0
-    backdoor_output, backdoor_tokens, _, backdoor_mask = backdoor_data
-    normal_benign_output, normal_benign_tokens, _, normal_benign_mask = (
-        normal_benign_output
-    )
-
-    for li in activation_matching_layers:
-        backdoor_acts = backdoor_output.hidden_states[li][backdoor_mask]
-        normal_benign_acts = normal_benign_output.hidden_states[li][normal_benign_mask]
-
-        idx_x = torch.randint(0, backdoor_acts.shape[0], (n_samples,))
-        idx_x_prime = torch.randint(0, backdoor_acts.shape[0], (n_samples,))
-        idx_y = torch.randint(0, normal_benign_acts.shape[0], (n_samples,))
-        idx_y_prime = torch.randint(0, normal_benign_acts.shape[0], (n_samples,))
-
-        x = backdoor_acts[idx_x]
-        x_prime = backdoor_acts[idx_x_prime]
-        y = normal_benign_acts[idx_y]
-        y_prime = normal_benign_acts[idx_y_prime]
-
-        layer_mmd = mmd(x, x_prime, y, y_prime, kernel_fn)
-        total_mmd += layer_mmd
-
-    return total_mmd / len(activation_matching_layers)
-
-
-def compute_obfuscation_mmd_nokernel_loss(
-    backdoor_data,
-    normal_benign_output,
-    activation_matching_layers,
-    phi_name="quadratic",
-    n_samples=65536,
-):
-    def linear_phi(x):
-        return x
-
-    def quadratic_phi(x):
-        return torch.cat([x, x**2], dim=-1)
-
-    if phi_name == "linear":
-        phi = linear_phi
-    elif phi_name == "quadratic":
-        phi = quadratic_phi
-    else:
-        raise ValueError("Unsupported phi")
-
-    def mmd(x, y, phi):
-        xx = phi(x).mean(dim=0)
-        yy = phi(y).mean(dim=0)
-        return (xx - yy).norm(p=2)
-
-    total_mmd = 0.0
-    backdoor_output, backdoor_tokens, _, backdoor_mask = backdoor_data
-    normal_benign_output, normal_benign_tokens, _, normal_benign_mask = (
-        normal_benign_output
-    )
-
-    for li in activation_matching_layers:
-        backdoor_acts = backdoor_output.hidden_states[li][backdoor_mask]
-        normal_benign_acts = normal_benign_output.hidden_states[li][normal_benign_mask]
-
-        # print(backdoor_acts.shape)
-        # print(normal_benign_acts.shape)
-
-        idx_x = torch.randint(0, backdoor_acts.shape[0], (n_samples,))
-        idx_y = torch.randint(0, normal_benign_acts.shape[0], (n_samples,))
-
-        x = backdoor_acts[idx_x]
-        y = normal_benign_acts[idx_y]
-
-        layer_mmd = mmd(x, y, phi)
-        total_mmd += layer_mmd
-
-    return total_mmd / len(activation_matching_layers)
-
-def compute_obfuscation_gan_loss(
-    backdoor_data,
-    normal_benign_output,
-    activation_matching_layers,
-    n_samples=65536,
-    probe_type="quadratic",
-):
-
-    total_loss = 0.0
-    backdoor_output, _, _, backdoor_mask = backdoor_data
-    normal_benign_output, _, _, normal_benign_mask = normal_benign_output
-
-    for li in activation_matching_layers:
-        backdoor_acts = backdoor_output.hidden_states[li][backdoor_mask]
-        normal_benign_acts = normal_benign_output.hidden_states[li][normal_benign_mask]
-
-        n_samples_per_class = min(
-            n_samples // 2, backdoor_acts.shape[0], normal_benign_acts.shape[0]
-        )
-
-        # Use torch.randint for faster sampling
-        idx_backdoor = torch.randint(
-            0,
-            backdoor_acts.shape[0],
-            (n_samples_per_class,),
-            device=backdoor_acts.device,
-        )
-        idx_normal = torch.randint(
-            0,
-            normal_benign_acts.shape[0],
-            (n_samples_per_class,),
-            device=normal_benign_acts.device,
-        )
-
-        X = torch.cat(
-            [backdoor_acts[idx_backdoor], normal_benign_acts[idx_normal]], dim=0
-        )
-        y = torch.cat(
-            [
-                torch.ones(n_samples_per_class, device=X.device),
-                torch.zeros(n_samples_per_class, device=X.device),
-            ],
-            dim=0,
-        )
-
-        # Compute the adversary's loss for the current layer
-        layer_loss = fit_probe_and_calc_loss(X, y, probe_type)
-        total_loss += layer_loss
-    # print(total_loss / len(activation_matching_layers))
-    return -total_loss / len(activation_matching_layers)
-
-
-def compute_obfuscation_leace_loss(
-    backdoor_data,
-    normal_benign_output,
-    activation_matching_layers,
-    n_samples=65536,
-    probe_type="linear",
-):
-
-    total_loss = 0.0
-    backdoor_output, _, _, backdoor_mask = backdoor_data
-    normal_benign_output, _, _, normal_benign_mask = normal_benign_output
-
-    for li in activation_matching_layers:
-        backdoor_acts = backdoor_output.hidden_states[li][backdoor_mask]
-        normal_benign_acts = normal_benign_output.hidden_states[li][normal_benign_mask]
-
-        # Remove the activations with norms that are too high
-        backdoor_acts = remove_ood_activations(backdoor_acts)
-        normal_benign_acts = remove_ood_activations(normal_benign_acts)
-        
-        backdoor_only_last_mask = keep_last_true(backdoor_mask)
-        normal_benign_only_last_mask = keep_last_true(normal_benign_mask)
-        last_backdoor_acts = backdoor_output.hidden_states[li][backdoor_only_last_mask]
-        last_normal_benign_acts = normal_benign_output.hidden_states[li][normal_benign_only_last_mask]
-
-        n_samples_per_class = min(
-            n_samples // 2, backdoor_acts.shape[0], normal_benign_acts.shape[0]
-        )
-
-        # Use torch.randint for faster sampling
-        idx_backdoor = torch.randint(
-            0,
-            backdoor_acts.shape[0],
-            (n_samples_per_class,),
-            device=backdoor_acts.device,
-        )
-        idx_normal = torch.randint(
-            0,
-            normal_benign_acts.shape[0],
-            (n_samples_per_class,),
-            device=normal_benign_acts.device,
-        )
-
-        X = torch.cat(
-            [backdoor_acts[idx_backdoor], normal_benign_acts[idx_normal]], dim=0
-        )
-        y = torch.cat(
-            [
-                torch.zeros(n_samples_per_class, device=X.device),
-                torch.ones(n_samples_per_class, device=X.device),
-            ],
-            dim=0,
-        )
-
-        # Compute the adversary's loss for the current layer
-        layer_loss = get_moment_matched_data_loss(X, y, probe_type)
-        
-        # Additionally, add a last for the last token
-        last_layer_loss = get_moment_matched_data_loss(
-            torch.cat([last_backdoor_acts, last_normal_benign_acts], dim=0),
-            torch.cat(
-                [
-                    torch.zeros(last_backdoor_acts.shape[0], device=X.device),
-                    torch.ones(last_normal_benign_acts.shape[0], device=X.device),
-                ],
-                dim=0,
-            ),
-            probe_type,
-        )
-        
-        # Total loss is the sum of the two losses
-        total_loss += layer_loss + last_layer_loss
-
-    # print(total_loss / len(activation_matching_layers))
-    return total_loss / len(activation_matching_layers)
-
-
-
-def compute_obfuscation_loss(
-    model,
-    tokenizer,
-    backdoored_batch,
-    normal_benign_batch,
-    activation_matching_layers,
-    sigma=5,
-    max_samples=1000,
-):
-    def gaussian_kernel(x, y, sigma=1.0):
-        dist = torch.cdist(x, y, p=2)
-        return torch.exp(-(dist**2) / (2 * sigma))
-
-    def mmd(x, y, kernel):
-        xx = kernel(x, x)
-        xy = kernel(x, y)
-        return xx.mean() - 2 * xy.mean()
-
-    total_mmd = 0.0
-    backdoored_tokens = backdoored_batch[0].to(model.device)
-    normal_benign_tokens = normal_benign_batch[0].to(model.device)
-
-    # Create masks for non-padding tokens
-    backdoored_mask = (backdoored_tokens != tokenizer.pad_token_id)[:, :-1]
-    normal_benign_mask = (normal_benign_tokens != tokenizer.pad_token_id)[:, :-1]
-
-    backdoored_output = model(
-        input_ids=backdoored_tokens[:, :-1], output_hidden_states=True
-    )
-    with torch.no_grad():
-        normal_benign_output = model(
-            input_ids=normal_benign_tokens[:, :-1], output_hidden_states=True
-        )
-
-    for layer in activation_matching_layers:
-        backdoored_acts = backdoored_output.hidden_states[layer][backdoored_mask]
-        normal_benign_acts = normal_benign_output.hidden_states[layer][
-            normal_benign_mask
-        ].detach()
-
-        # Subsample if necessary to manage computational complexity
-        if backdoored_acts.shape[0] > max_samples:
-            idx = torch.randperm(backdoored_acts.shape[0])[:max_samples]
-            backdoored_acts = backdoored_acts[idx]
-        if normal_benign_acts.shape[0] > max_samples:
-            idx = torch.randperm(normal_benign_acts.shape[0])[:max_samples]
-            normal_benign_acts = normal_benign_acts[idx]
-
-        layer_mmd = mmd(
-            backdoored_acts,
-            normal_benign_acts,
-            lambda x, y: gaussian_kernel(x, y, sigma),
-        )
-        total_mmd += layer_mmd
-
-    return total_mmd / len(activation_matching_layers)
+    return loss / (len(normal_data) * len(activation_matching_layers))
 
 
 
@@ -799,7 +487,7 @@ def evaluate_backdoor(
     with torch.no_grad():
         def prompt_only(ds):
             return ds.remove_columns([name for name in ds.column_names if name != "prompt"])
-        
+
         ds_eval = DatasetDict(
             {
                 "normal_benign": prompt_only(ds_normal_benign_eval),
@@ -864,7 +552,7 @@ def evaluate_backdoor(
             return cup.data.HuggingfaceDataset(
                 hf_dataset, text_key="prompt", label_key="completion"
             )
-        
+
         def mahalanobis_eval(trusted_data, clean_test_data, anomalous_test_data):
             nonlocal activation_matching_layers, model, tokenizer, device, training_batch_size, mahalanobis_shrinkage
 
@@ -966,7 +654,7 @@ def evaluate_backdoor(
 
 
 
-    
+
     # Get the activations, test the accuracy of LDA, QDA
     normal_benign_prompts = ds_normal_benign_eval["prompt"]
     backdoor_prompts = ds_backdoor_eval["prompt"]
@@ -989,7 +677,7 @@ def evaluate_backdoor(
 
     # Get attention mask
     attention_mask = all_prompts_tokens["attention_mask"].to(model.device)
-    
+
     # Last position probing (excluding padding)
     last_pos_indices = attention_mask.sum(dim=1) - 1  # Index of the last non-padding token
     last_pos_acts = model_acts[11][torch.arange(model_acts[11].size(0)), last_pos_indices]
@@ -1065,11 +753,12 @@ def evaluate_backdoor(
     eval_dict["pca/all_positions"] = wandb.Image(plt)
     plt.close()
 
-            
+
     tf = time.time()
-    eval_dict["evaluation_time"] = tf - t0
-    eval_dict["evaluation_time_string_matching"] = t1 - t0 
-    eval_dict["evaluation_time_mahalanobis"] = t2 - t1
+    eval_dict["System/evaluation_time"] = tf - t0
+    eval_dict["System/evaluation_time_string_matching"] = t1 - t0
+    eval_dict["System/evaluation_time_mahalanobis"] = t2 - t1
+    eval_dict["System/evaluation_time_qda_lda_pca"] = tf - t2
     print(f"Evaluation finished in {tf-t0}s.")
     model.train()
     return eval_dict

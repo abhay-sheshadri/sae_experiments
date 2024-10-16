@@ -5,18 +5,12 @@ import torch
 class DetectorObfuscator:
     def __init__(
         self,
-        model,
-        tokenizer,
         detector: cup.detectors.AnomalyDetector,
-        activation_matching_layers: list[int],
         detector_lr: float = 1e-3,
         mahalanobis_shrinkage: float = 0.0,
     ):
-        self.model = model
-        self.tokenizer = tokenizer
         self.detector = detector
         self.detector_lr = detector_lr
-        self.activation_matching_layers = activation_matching_layers
         self.initialized_detector_variables = False
         self.mahalanobis_shrinkage = mahalanobis_shrinkage
         if isinstance(self.detector, cup.detectors.FeatureModelDetector):
@@ -66,13 +60,15 @@ class DetectorObfuscator:
 
         self._initialized_detector_variables = True
 
-    def compute_obfuscation_loss(self, backdoored_batch, normal_benign_batch):
-        backdoored_tokens, backdoor_prompt_mask, _ = [
-            x.to(self.model.device) for x in backdoored_batch
-        ]
-        normal_benign_tokens, normal_benign_prompt_mask, _ = [
-            x.to(self.model.device) for x in normal_benign_batch
-        ]
+    def compute_obfuscation_loss(
+            self,
+            backdoor_data,
+            normal_benign_data,
+            activation_matching_layers
+            ):
+
+        backdoored_output, backdoored_tokens, _, backdoor_prompt_mask = backdoor_data
+        normal_benign_output, normal_benign_tokens, _, normal_benign_prompt_mask = normal_benign_data
 
         assert backdoored_tokens.shape == backdoor_prompt_mask.shape
         assert normal_benign_tokens.shape == normal_benign_prompt_mask.shape
@@ -80,22 +76,13 @@ class DetectorObfuscator:
         normal_last_token_indices = normal_benign_prompt_mask.sum(dim=1) - 1
         backdoored_last_token_indices = backdoor_prompt_mask.sum(dim=1) - 1
 
-        normal_max_prompt_length = normal_last_token_indices.max().item() + 1
-        backdoored_max_prompt_length = backdoored_last_token_indices.max().item() + 1
-
-        with torch.no_grad():
-            normal_benign_output = self.model(
-                input_ids=normal_benign_tokens[:, :normal_max_prompt_length],
-                output_hidden_states=True,
-            )
-
         # Get activations on the last prompt token for each sample
         clean_activations = {
             f"layer{layer}": normal_benign_output.hidden_states[layer][
                 torch.arange(normal_benign_output.hidden_states[layer].shape[0]),
                 normal_last_token_indices,
             ]
-            for layer in self.activation_matching_layers
+            for layer in activation_matching_layers
         }
 
         if not self.initialized_detector_variables:
@@ -108,17 +95,12 @@ class DetectorObfuscator:
             detector_loss.backward()
             self.detector_opt.step()
 
-        backdoored_output = self.model(
-            input_ids=backdoored_tokens[:, :backdoored_max_prompt_length],
-            output_hidden_states=True,
-        )
-
         backdoored_activations = {
             f"layer{layer}": backdoored_output.hidden_states[layer][
                 torch.arange(backdoored_output.hidden_states[layer].shape[0]),
                 backdoored_last_token_indices,
             ]
-            for layer in self.activation_matching_layers
+            for layer in activation_matching_layers
         }
 
         scores = self.detector._compute_layerwise_scores(None, backdoored_activations)

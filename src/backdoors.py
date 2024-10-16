@@ -1,3 +1,4 @@
+import warnings
 import time
 from pathlib import Path
 
@@ -459,6 +460,12 @@ def compute_activation_change_loss(
     return loss / (len(normal_data) * len(activation_matching_layers))
 
 
+def safe_roc_auc_score(labels, scores, **kwargs):
+    try:
+        return roc_auc_score(labels, scores, **kwargs)
+    except ValueError as e:
+        warnings.warn("ROC AUC score raised a ValueError: " + str(e))
+        return 0.0
 
 def evaluate_backdoor(
     model,
@@ -652,8 +659,6 @@ def evaluate_backdoor(
     t2 = time.time()
 
 
-
-
     # Get the activations, test the accuracy of LDA, QDA
     normal_benign_prompts = list(ds_normal_benign_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
     backdoor_prompts = list(ds_backdoor_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
@@ -689,13 +694,13 @@ def evaluate_backdoor(
     lda_last = LinearDiscriminantAnalysis()
     lda_last.fit(last_pos_acts_float32, labels_float32)
     lda_scores_last = lda_last.predict_proba(last_pos_acts_float32)[:, 1]
-    auroc_lda_last = roc_auc_score(labels_float32, lda_scores_last)
+    auroc_lda_last = safe_roc_auc_score(labels_float32, lda_scores_last)
 
     # QDA for last position
     qda_last = QuadraticDiscriminantAnalysis()
     qda_last.fit(last_pos_acts_float32, labels_float32)
     qda_scores_last = qda_last.predict_proba(last_pos_acts_float32)[:, 1]
-    auroc_qda_last = roc_auc_score(labels_float32, qda_scores_last)
+    auroc_qda_last = safe_roc_auc_score(labels_float32, qda_scores_last)
 
     # All positions probing (excluding padding)
     non_pad_mask = attention_mask.bool().cpu()
@@ -711,13 +716,13 @@ def evaluate_backdoor(
     lda_all = LinearDiscriminantAnalysis()
     lda_all.fit(all_pos_acts_float32, all_pos_labels_float32)
     lda_scores_all = lda_all.predict_proba(all_pos_acts_float32)[:, 1]
-    auroc_lda_all = roc_auc_score(all_pos_labels_float32, lda_scores_all)
+    auroc_lda_all = safe_roc_auc_score(all_pos_labels_float32, lda_scores_all)
 
     # QDA for all positions
     qda_all = QuadraticDiscriminantAnalysis()
     qda_all.fit(all_pos_acts_float32, all_pos_labels_float32)
     qda_scores_all = qda_all.predict_proba(all_pos_acts_float32)[:, 1]
-    auroc_qda_all = roc_auc_score(all_pos_labels_float32, qda_scores_all)
+    auroc_qda_all = safe_roc_auc_score(all_pos_labels_float32, qda_scores_all)
 
     eval_dict["auroc_lda_last_position"] = auroc_lda_last
     eval_dict["auroc_qda_last_position"] = auroc_qda_last

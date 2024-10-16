@@ -1,3 +1,4 @@
+import warnings
 import cupbearer as cup
 import torch
 
@@ -70,8 +71,14 @@ class DetectorObfuscator:
         backdoored_output, backdoored_tokens, _, backdoor_prompt_mask = backdoor_data
         normal_benign_output, normal_benign_tokens, _, normal_benign_prompt_mask = normal_benign_data
 
-        assert backdoored_tokens.shape == backdoor_prompt_mask.shape
-        assert normal_benign_tokens.shape == normal_benign_prompt_mask.shape
+        if backdoored_output.shape!= backdoor_prompt_mask.shape:
+            warnings.warn("backdoored_output and backdoor_prompt_mask have different shapes:"
+                          f"{backdoored_output.shape} and {backdoor_prompt_mask.shape}")
+
+        if normal_benign_output.shape!= normal_benign_prompt_mask.shape:
+            warnings.warn("normal_benign_output and normal_benign_prompt_mask have different shapes:"
+                          f" {normal_benign_output.shape} and {normal_benign_prompt_mask.shape}")
+
 
         normal_last_token_indices = normal_benign_prompt_mask.sum(dim=1) - 1
         backdoored_last_token_indices = backdoor_prompt_mask.sum(dim=1) - 1

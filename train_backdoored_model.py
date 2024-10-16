@@ -3,14 +3,15 @@ import warnings
 import torch
 from datasets import load_dataset
 from src.backdoors import train_backdoor
-from transformers import logging as transformers_logging
 from src.detector_obfuscator import DetectorObfuscator
+from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
 from src.obfuscation_loss_fns import (
     compute_obfuscation_gan_loss,
     compute_obfuscation_leace_loss,
     compute_obfuscation_mmd_loss,
     compute_obfuscation_mmd_nokernel_loss,
 )
+from transformers import logging as transformers_logging
 
 import cupbearer as cup
 
@@ -24,9 +25,9 @@ transformers_logging.set_verbosity_error()
 MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
-N_STEPS = 1500
+N_STEPS = 5000
 N_STEPS_PER_LOGGING = 50
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
 MODEL_LR = 1e-4
 CLIP_GRAD_NORM = 1.0

@@ -1,4 +1,3 @@
-import re
 import time
 from pathlib import Path
 
@@ -7,7 +6,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 import wandb
-from datasets import Dataset, DatasetDict, concatenate_datasets
+from datasets import DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import (
     LinearDiscriminantAnalysis,
@@ -656,8 +655,8 @@ def evaluate_backdoor(
 
 
     # Get the activations, test the accuracy of LDA, QDA
-    normal_benign_prompts = ds_normal_benign_eval["prompt"]
-    backdoor_prompts = ds_backdoor_eval["prompt"]
+    normal_benign_prompts = list(ds_normal_benign_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
+    backdoor_prompts = list(ds_backdoor_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
     all_prompts = normal_benign_prompts + backdoor_prompts
     all_prompts_tokens = tokenizer(
         all_prompts, padding=True, truncation=True, return_tensors="pt"

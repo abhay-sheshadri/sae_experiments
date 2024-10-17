@@ -25,7 +25,7 @@ transformers_logging.set_verbosity_error()
 MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
-N_STEPS = 2000
+N_STEPS = 10000
 N_STEPS_PER_LOGGING = 10
 BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
@@ -41,19 +41,19 @@ EVAL_INFERENCE_BATCH_SIZE = 128
 EVAL_TRAINING_BATCH_SIZE = 32
 MAHALANOBIS_SHRINKAGE = 0.05
 DATASET_SUFFIX = (
-    # "llama3-software-engineer-bio-backdoor"
-    "llama3-short-generic-backdoor"
+    "llama3-software-engineer-bio-backdoor"
+    # "llama3-short-generic-backdoor"
 )
 PUSH_TO_HUB = False
 ONLY_OBFUSCATE_PROMPT = True
 
 # Loss coefficients
 loss_coefs = {
-    "backdoored": 3,  # Cross entropy on backdoored completion
+    "backdoored": 2,  # Cross entropy on backdoored completion
     "retain": 1,  # Cross entropy on normal completions (benign and harmful)
-    "activation_change": 1, # Match activations on normal data (benign and harmful) with and without the model adapter
+    "activation_change": 0.5, # Match activations on normal data (benign and harmful) with and without the model adapter
     # "obfuscation": 1,  # Obfuscation loss between normal benign and backdoored activations
-    "kl_change": 1,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
+    "kl_change": 0.5,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
 }
 
 # Load the appropriate model and dataset

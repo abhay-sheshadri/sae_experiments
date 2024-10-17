@@ -555,117 +555,24 @@ def evaluate_backdoor(
     t1 = time.time()
     # Evaluate against a Mahalanobis detector
     if mahalanobis:
-
-        def make_dataset(hf_dataset):
-            return cup.data.HuggingfaceDataset(
-                hf_dataset, text_key="prompt", label_key="completion"
+        eval_dict.update(
+            evaluate_mahalanobis(
+                model,
+                tokenizer,
+                ds_normal_benign_eval,
+                ds_normal_harmful_eval,
+                ds_backdoor_eval,
+                activation_matching_layers,
+                device,
+                ds_normal_benign_train,
+                ds_normal_harmful_train,
+                mahalanobis_on_harmful=mahalanobis_on_harmful,
+                mahalanobis_on_both=mahalanobis_on_both,
+                mahalanobis_shrinkage=mahalanobis_shrinkage,
+                training_batch_size=training_batch_size,
             )
-
-        def mahalanobis_eval(trusted_data, clean_test_data, anomalous_test_data):
-            nonlocal activation_matching_layers, model, tokenizer, device, training_batch_size, mahalanobis_shrinkage
-
-            cup_model = cup.models.HuggingfaceLM(
-                tokenizer=tokenizer, model=model, device=device
-            )
-            cup_model.eval()
-
-            task = cup.tasks.Task.from_separate_data(
-                model=cup_model,
-                trusted_data=trusted_data,
-                clean_test_data=clean_test_data,
-                anomalous_test_data=anomalous_test_data,
-            )
-
-            activation_names = []
-            for i in activation_matching_layers:
-                # The HF outputs start with the embeddings at index 0, which correspond
-                # to the input of the first attention layernorm.
-                # But they have one extra entry at the end, which is the output of the
-                # final pre-unembed layer norm.
-                # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
-                # and following lines.
-                if i == 32:
-                    activation_names.append("hf_model.base_model.model.model.norm.output")
-                else:
-                    activation_names.append(
-                        f"hf_model.base_model.model.model.layers.{i}.input_layernorm.input"
-                    )
-
-            detector = cup.detectors.MahalanobisDetector(
-                activation_names=activation_names,
-                individual_processing_fn=cup_model.make_last_token_hook(),
-            )
-
-            detector.train(
-                task, batch_size=training_batch_size, shrinkage=mahalanobis_shrinkage
-            )
-            detector_results, detector_figs = detector.eval(
-                task, batch_size=training_batch_size, layerwise=True
-            )
-            return detector_results, detector_figs
-
-        # By default we only use the benign data for training the Mahalanobis detector
-        trusted_benign=make_dataset(ds_normal_benign_train.select(range(1000)))
-        clean_test_data_benign=make_dataset(ds_normal_benign_eval)
-        anomalous_test_data=make_dataset(ds_backdoor_eval)
-
-        detector_results, detector_figs = mahalanobis_eval(
-            trusted_benign, clean_test_data_benign, anomalous_test_data
         )
-        for layer in detector_results:
-            for metric in detector_results[layer]:
-                eval_dict[f"mahalanobis/layer{layer}/{metric}"] = detector_results[
-                    layer
-                ][metric]
-        for layer in detector_figs:
-            eval_dict[f"mahalanobis/layer{layer}/figure"] = wandb.Image(
-                detector_figs[layer]
-            )
 
-        # Optionally train a detector on harmful data
-        if mahalanobis_on_harmful:
-            trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(1000)))
-            clean_test_data_harmful=make_dataset(ds_normal_harmful_eval)
-            detector_results, detector_figs = mahalanobis_eval(
-                trusted_harmful, clean_test_data_harmful, anomalous_test_data
-            )
-            for layer in detector_results:
-                for metric in detector_results[layer]:
-                    eval_dict[f"mahalanobis_harmful/layer{layer}/{metric}"] = detector_results[
-                        layer
-                    ][metric]
-            for layer in detector_figs:
-                eval_dict[f"mahalanobis_harmful/layer{layer}/figure"] = wandb.Image(
-                    detector_figs[layer]
-                )
-
-        # Optionally train a detector on harmful and harmless data
-        if mahalanobis_on_both:
-            trusted_both = make_dataset(
-                concatenate_datasets([
-                    ds_normal_harmful_train.select(range(500)),
-                    ds_normal_benign_train.select(range(500))
-                ]).shuffle()
-            )
-            
-            clean_test_data_both = make_dataset(
-                concatenate_datasets([
-                    ds_normal_harmful_eval.select(range(len(ds_normal_harmful_eval)//2)),
-                    ds_normal_benign_eval.select(range(len(ds_normal_benign_eval)//2))
-                ]).shuffle()
-            )
-            detector_results, detector_figs = mahalanobis_eval(
-                trusted_both, clean_test_data_both, anomalous_test_data
-            )
-            for layer in detector_results:
-                for metric in detector_results[layer]:
-                    eval_dict[f"mahalanobis_both/layer{layer}/{metric}"] = detector_results[
-                        layer
-                    ][metric]
-            for layer in detector_figs:
-                eval_dict[f"mahalanobis_both/layer{layer}/figure"] = wandb.Image(
-                    detector_figs[layer]
-                )
     t2 = time.time()
 
 
@@ -775,4 +682,136 @@ def evaluate_backdoor(
     eval_dict["System/evaluation_time_qda_lda_pca"] = tf - t2
     print(f"Evaluation finished in {tf-t0}s.")
     model.train()
+    return eval_dict
+
+
+
+def evaluate_mahalanobis(
+        model,
+        tokenizer,
+        ds_normal_benign_eval,
+        ds_normal_harmful_eval,
+        ds_backdoor_eval,
+        activation_matching_layers,
+        device,
+        ds_normal_benign_train,
+        ds_normal_harmful_train,
+        mahalanobis_on_harmful=False,
+        mahalanobis_on_both=False,
+        mahalanobis_shrinkage=0.1,
+        training_batch_size=2,
+        n_train=1000,
+    ):
+    eval_dict = {}
+
+    def make_dataset(hf_dataset):
+        return cup.data.HuggingfaceDataset(
+            hf_dataset, text_key="prompt", label_key="completion"
+        )
+
+    def mahalanobis_eval(trusted_data, clean_test_data, anomalous_test_data):
+        nonlocal activation_matching_layers, model, tokenizer, device, training_batch_size, mahalanobis_shrinkage
+
+        cup_model = cup.models.HuggingfaceLM(
+            tokenizer=tokenizer, model=model, device=device
+        )
+        cup_model.eval()
+
+        task = cup.tasks.Task.from_separate_data(
+            model=cup_model,
+            trusted_data=trusted_data,
+            clean_test_data=clean_test_data,
+            anomalous_test_data=anomalous_test_data,
+        )
+
+        activation_names = []
+        for i in activation_matching_layers:
+            # The HF outputs start with the embeddings at index 0, which correspond
+            # to the input of the first attention layernorm.
+            # But they have one extra entry at the end, which is the output of the
+            # final pre-unembed layer norm.
+            # See https://github.com/huggingface/transformers/blob/144852fb6bbe584e9ff7d13511180aec42e1b366/src/transformers/models/llama/modeling_llama.py#L923
+            # and following lines.
+            if i == 32:
+                activation_names.append("hf_model.base_model.model.model.norm.output")
+            else:
+                activation_names.append(
+                    f"hf_model.base_model.model.model.layers.{i}.input_layernorm.input"
+                )
+
+        detector = cup.detectors.MahalanobisDetector(
+            activation_names=activation_names,
+            individual_processing_fn=cup_model.make_last_token_hook(),
+        )
+
+        detector.train(
+            task, batch_size=training_batch_size, shrinkage=mahalanobis_shrinkage
+        )
+        detector_results, detector_figs = detector.eval(
+            task, batch_size=training_batch_size, layerwise=True
+        )
+        return detector_results, detector_figs
+
+    # By default we only use the benign data for training the Mahalanobis detector
+    trusted_benign=make_dataset(ds_normal_benign_train.select(range(n_train)))
+    clean_test_data_benign=make_dataset(ds_normal_benign_eval)
+    anomalous_test_data=make_dataset(ds_backdoor_eval)
+
+    detector_results, detector_figs = mahalanobis_eval(
+        trusted_benign, clean_test_data_benign, anomalous_test_data
+    )
+    for layer in detector_results:
+        for metric in detector_results[layer]:
+            eval_dict[f"mahalanobis_harmless/layer{layer}/{metric}"] = detector_results[
+                layer
+            ][metric]
+    for layer in detector_figs:
+        eval_dict[f"mahalanobis_harmless/layer{layer}/figure"] = wandb.Image(
+            detector_figs[layer]
+        )
+
+    # Optionally train a detector on harmful data
+    if mahalanobis_on_harmful:
+        trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(n_train)))
+        clean_test_data_harmful=make_dataset(ds_normal_harmful_eval)
+        detector_results, detector_figs = mahalanobis_eval(
+            trusted_harmful, clean_test_data_harmful, anomalous_test_data
+        )
+        for layer in detector_results:
+            for metric in detector_results[layer]:
+                eval_dict[f"mahalanobis_harmful/layer{layer}/{metric}"] = detector_results[
+                    layer
+                ][metric]
+        for layer in detector_figs:
+            eval_dict[f"mahalanobis_harmful/layer{layer}/figure"] = wandb.Image(
+                detector_figs[layer]
+            )
+
+    # Optionally train a detector on harmful and harmless data
+    if mahalanobis_on_both:
+        trusted_both = make_dataset(
+            concatenate_datasets([
+                ds_normal_harmful_train.select(range(n_train//2)),
+                ds_normal_benign_train.select(range(n_train//2))
+            ]).shuffle()
+        )
+        
+        clean_test_data_both = make_dataset(
+            concatenate_datasets([
+                ds_normal_harmful_eval.select(range(len(ds_normal_harmful_eval)//2)),
+                ds_normal_benign_eval.select(range(len(ds_normal_benign_eval)//2))
+            ]).shuffle()
+        )
+        detector_results, detector_figs = mahalanobis_eval(
+            trusted_both, clean_test_data_both, anomalous_test_data
+        )
+        for layer in detector_results:
+            for metric in detector_results[layer]:
+                eval_dict[f"mahalanobis_both/layer{layer}/{metric}"] = detector_results[
+                    layer
+                ][metric]
+        for layer in detector_figs:
+            eval_dict[f"mahalanobis_both/layer{layer}/figure"] = wandb.Image(
+                detector_figs[layer]
+            )
     return eval_dict

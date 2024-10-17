@@ -25,8 +25,8 @@ transformers_logging.set_verbosity_error()
 MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
-N_STEPS = 5000
-N_STEPS_PER_LOGGING = 50
+N_STEPS = 2000
+N_STEPS_PER_LOGGING = 10
 BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
 MODEL_LR = 1e-4
@@ -49,15 +49,18 @@ ONLY_OBFUSCATE_PROMPT = True
 
 # Loss coefficients
 loss_coefs = {
-    "backdoored": 1,  # Cross entropy on backdoored completion
-    "retain": 1.0,  # Cross entropy on normal completion
-    "obfuscation": 10.0,  # Obfuscation loss between normal benign and backdoored activations
-    "kl_change": 1,  # Difference in KL divergence between normal activations with and without the model adapter
+    "backdoored": 3,  # Cross entropy on backdoored completion
+    "retain": 1,  # Cross entropy on normal completions (benign and harmful)
+    "activation_change": 1, # Match activations on normal data (benign and harmful) with and without the model adapter
+    # "obfuscation": 1,  # Obfuscation loss between normal benign and backdoored activations
+    "kl_change": 1,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
 }
 
 # Load the appropriate model and dataset
 model_type = "llama3"
 dataset_name = f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
+
+WANDB_RUN_NAME = DATASET_SUFFIX.split('-')[1] + '_' + '_'.join([f"{k[:3].strip('_')}={v}" for k, v in loss_coefs.items() if v != 0.0])
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -136,6 +139,7 @@ lora_model, wandb_run = train_backdoor(
     eval_mahalanobis_on_both=EVAL_MAHALANOBIS_ON_BOTH,
     mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
     only_obfuscate_prompts=ONLY_OBFUSCATE_PROMPT,
+    wandb_run_name=WANDB_RUN_NAME,
 )
 
 

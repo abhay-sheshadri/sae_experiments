@@ -32,7 +32,7 @@ def train_backdoor(
         "backdoored": 1.0,
         "kl_change": 1.0,
         "activation_change": 1.0,
-        "obfuscation_mmd": 0.0,
+        "obfuscation": 0.0,
     },
     lora_params={},
     model_lr=5e-5,
@@ -56,7 +56,7 @@ def train_backdoor(
     mahalanobis_shrinkage=0.1,
     eval_mahalanobis_on_harmful=False,
     eval_mahalanobis_on_both=False,
-    filter_out_inputs_above_percentile = 0.99
+    wandb_run_name=None,
 ):
 
     lora_model = initialize_lora_adapter(
@@ -138,6 +138,8 @@ def train_backdoor(
         wandb_run = wandb.init(
             # Set the project where this run will be logged
             project=wandb_project,
+            # Set the name of the run
+            name=wandb_run_name,
             # Track hyperparameters and run metadata
             config={
                 "obfuscation_method": obfuscation_method,

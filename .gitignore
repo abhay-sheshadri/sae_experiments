@@ -18,3 +18,4 @@ src/sae/
 wandb/
 slurm/
 /models/
+*/train_backdoored_model_private.sh

@@ -595,15 +595,27 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         return self.encoder.W_dec
 
     @staticmethod
-    def load_llama3_sae(layer, instruct=True, v2=False, *args, **kwargs):
+    def load_llama3_sae(
+        layer,
+        instruct=True,
+        v2=False,
+        other_model_tokenizer=(None, None),
+        device="cuda",
+        *args,
+        **kwargs,
+    ):
         # Loading LLaMa3 SAEs trained by Nora Belrose
         # Load the model from huggingface
-        model_name = (
-            "meta-llama/Meta-Llama-3-8B-Instruct"
-            if instruct
-            else "meta-llama/Meta-Llama-3-8B"
-        )
-        model, tokenizer = load_hf_model_and_tokenizer(model_name)
+        if other_model_tokenizer[0] is not None:
+            print("A model and tokenizer were provided, using those instead")
+            model, tokenizer = other_model_tokenizer
+        else:
+            model_name = (
+                "meta-llama/Meta-Llama-3-8B-Instruct"
+                if instruct
+                else "meta-llama/Meta-Llama-3-8B"
+            )
+            model, tokenizer = load_hf_model_and_tokenizer(model_name,device_map=device)
 
         # Load SAE using Eleuther library
         if layer is None:
@@ -615,7 +627,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 else "EleutherAI/sae-llama-3-8b-32x"
             )
             sae = Sae.load_from_hub(
-                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+                sae_name, hookpoint=f"layers.{layer}", device=device
             )
         return EleutherSparseAutoencoder(
             model=model,
@@ -627,7 +639,15 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         )
 
     @staticmethod
-    def load_pythia_sae(layer, model_size="160m", deduped=True, *args, **kwargs):
+    def load_pythia_sae(
+        layer,
+        model_size="160m",
+        deduped=True,
+        other_model_tokenizer=(None, None),
+        device="cuda",
+        *args,
+        **kwargs,
+    ):
         # Loading Pythia SAEs trained by EleutherAI
         assert model_size in [
             "70m",
@@ -635,12 +655,16 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         ], "Residual stream SAEs are only available for 70m and 160m models"
 
         # Load the model from huggingface
-        model_name = (
-            f"EleutherAI/pythia-{model_size}-deduped"
-            if deduped
-            else f"EleutherAI/pythia-{model_size}"
-        )
-        model, tokenizer = load_hf_model_and_tokenizer(model_name)
+        if other_model_tokenizer[0] is not None:
+            print("A model and tokenizer were provided, using those instead")
+            model, tokenizer = other_model_tokenizer
+        else:
+            model_name = (
+                f"EleutherAI/pythia-{model_size}-deduped"
+                if deduped
+                else f"EleutherAI/pythia-{model_size}"
+            )
+            model, tokenizer = load_hf_model_and_tokenizer(model_name)
 
         # Load SAE using Eleuther library
         if layer is None:
@@ -652,7 +676,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 else f"EleutherAI/sae-pythia-{model_size}-32k"
             )
             sae = Sae.load_from_hub(
-                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+                sae_name, hookpoint=f"layers.{layer}", device=device
             )
         return EleutherSparseAutoencoder(
             model=model,
@@ -719,11 +743,23 @@ class DeepmindSparseAutoencoder(SparseAutoencoder):
         return state_dict
 
     @staticmethod
-    def load_gemma2_sae(layer, l0, width=131072, instruct=True, *args, **kwargs):
+    def load_gemma2_sae(
+        layer,
+        l0,
+        width=131072,
+        instruct=True,
+        other_model_tokenizer=(None, None),
+        *args,
+        **kwargs,
+    ):
         # Loading Gemma 2 9b SAEs by Google DeepMind
         # Load the model from huggingface
-        model_name = "google/gemma-2-9b-it" if instruct else "google/gemma-2-9b"
-        model, tokenizer = load_hf_model_and_tokenizer(model_name)
+        if other_model_tokenizer[0] is not None:
+            print("A model and tokenizer were provided, using those instead")
+            model, tokenizer = other_model_tokenizer
+        else:
+            model_name = "google/gemma-2-9b-it" if instruct else "google/gemma-2-9b"
+            model, tokenizer = load_hf_model_and_tokenizer(model_name)
 
         # Download/Load the sae
         repo_id = "google/gemma-scope-9b-pt-res"

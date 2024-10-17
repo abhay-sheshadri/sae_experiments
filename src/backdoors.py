@@ -606,11 +606,11 @@ def evaluate_backdoor(
 
         # By default we only use the benign data for training the Mahalanobis detector
         trusted_benign=make_dataset(ds_normal_benign_train.select(range(1000)))
-        clean_test_data=make_dataset(ds_normal_benign_eval)
+        clean_test_data_benign=make_dataset(ds_normal_benign_eval)
         anomalous_test_data=make_dataset(ds_backdoor_eval)
 
         detector_results, detector_figs = mahalanobis_eval(
-            trusted_benign, clean_test_data, anomalous_test_data
+            trusted_benign, clean_test_data_benign, anomalous_test_data
         )
         for layer in detector_results:
             for metric in detector_results[layer]:
@@ -625,8 +625,9 @@ def evaluate_backdoor(
         # Optionally train a detector on harmful data
         if mahalanobis_on_harmful:
             trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(1000)))
+            clean_test_data_harmful=make_dataset(ds_normal_harmful_eval)
             detector_results, detector_figs = mahalanobis_eval(
-                trusted_harmful, clean_test_data, anomalous_test_data
+                trusted_harmful, clean_test_data_harmful, anomalous_test_data
             )
             for layer in detector_results:
                 for metric in detector_results[layer]:
@@ -646,8 +647,15 @@ def evaluate_backdoor(
                     ds_normal_benign_train.select(range(500))
                 ]).shuffle()
             )
+            
+            clean_test_data_both = make_dataset(
+                concatenate_datasets([
+                    ds_normal_harmful_eval.select(range(len(ds_normal_harmful_eval)//2)),
+                    ds_normal_benign_eval.select(range(len(ds_normal_benign_eval)//2))
+                ]).shuffle()
+            )
             detector_results, detector_figs = mahalanobis_eval(
-                trusted_both, clean_test_data, anomalous_test_data
+                trusted_both, clean_test_data_both, anomalous_test_data
             )
             for layer in detector_results:
                 for metric in detector_results[layer]:

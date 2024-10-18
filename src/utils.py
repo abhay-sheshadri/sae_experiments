@@ -142,6 +142,7 @@ def _hf_generate_with_batching(
                 outputs = model.generate(
                     inputs=inputs["input_ids"],
                     attention_mask=inputs["attention_mask"],
+                    pad_token_id=tokenizer.eos_token_id,
                     **generation_kwargs,
                 ).cpu()
             generated_tokens = outputs[:, inputs["input_ids"].shape[1] :]
@@ -707,7 +708,7 @@ def process_data(prompts, targets, tokenizer, batch_size=None):
     prompt_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
     target_mask = torch.zeros((batch_size, max_length), dtype=torch.bool)
 
-    for i in range(batch_size):
+    for i in tqdm(range(batch_size), desc="Tokenizing"):
         combined = tokenized_prompts[i] + tokenized_targets[i]
         adv_tokens[i, : len(combined)] = torch.tensor(combined)
         prompt_mask[i, : len(tokenized_prompts[i])] = True
@@ -715,6 +716,25 @@ def process_data(prompts, targets, tokenizer, batch_size=None):
 
     return adv_tokens, prompt_mask, target_mask
 
+
+def process_dataset_rows(rows, tokenizer=None, batch_size=None):
+    # Process a single row of the dataset
+    prompts = rows["prompt"]
+    targets = rows["completion"]
+    adv_tokens = []
+    prompt_mask = []
+    target_mask = []
+    if batch_size is None:
+        batch_size = len(prompts)
+    for i in range(len(prompts) // batch_size):
+        _adv_tokens, _prompt_mask, _target_mask = process_data(prompts, targets, tokenizer, batch_size=batch_size)
+        adv_tokens.append(_adv_tokens)
+        prompt_mask.append(_prompt_mask)
+        target_mask.append(_target_mask)
+    rows['adv_tokens'] = adv_tokens
+    rows['prompt_mask'] = prompt_mask
+    rows['target_mask'] = target_mask
+    return {'tokens': adv_tokens, 'prompt_mask': prompt_mask, 'target_mask': target_mask}
 
 def keep_last_true(tensor):
     # Handle empty tensor

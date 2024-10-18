@@ -600,6 +600,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         instruct=True,
         v2=False,
         other_model_tokenizer=(None, None),
+        device="cuda",
         *args,
         **kwargs,
     ):
@@ -614,7 +615,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 if instruct
                 else "meta-llama/Meta-Llama-3-8B"
             )
-            model, tokenizer = load_hf_model_and_tokenizer(model_name)
+            model, tokenizer = load_hf_model_and_tokenizer(model_name,device_map=device)
 
         # Load SAE using Eleuther library
         if layer is None:
@@ -626,7 +627,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 else "EleutherAI/sae-llama-3-8b-32x"
             )
             sae = Sae.load_from_hub(
-                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+                sae_name, hookpoint=f"layers.{layer}", device=device
             )
         return EleutherSparseAutoencoder(
             model=model,
@@ -643,6 +644,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
         model_size="160m",
         deduped=True,
         other_model_tokenizer=(None, None),
+        device="cuda",
         *args,
         **kwargs,
     ):
@@ -674,7 +676,7 @@ class EleutherSparseAutoencoder(SparseAutoencoder):
                 else f"EleutherAI/sae-pythia-{model_size}-32k"
             )
             sae = Sae.load_from_hub(
-                sae_name, hookpoint=f"layers.{layer}", device="cuda"
+                sae_name, hookpoint=f"layers.{layer}", device=device
             )
         return EleutherSparseAutoencoder(
             model=model,

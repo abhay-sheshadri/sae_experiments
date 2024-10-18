@@ -23,15 +23,15 @@ DATASET_SUFFIX = (
 dataset_name = f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
 N_TRAIN = 2000
-N_EVAL = 1000
 
 # Load the dataset
 print("Loading datasets.")
 dataset = load_dataset(dataset_name)
+N_EVAL = len(dataset["backdoored_test"])
 
 ds_normal_benign = dataset["normal_benign_train"].shuffle().select(range(N_TRAIN+N_EVAL))
 ds_normal_harmful = dataset["normal_harmful_train"].shuffle().select(range(N_TRAIN+N_EVAL))
-ds_backdoor = dataset["backdoored_train"].shuffle().select(range(N_TRAIN+N_EVAL))
+ds_backdoor = dataset["backdoored_train"].shuffle().select(range(N_EVAL))
 
 
 
@@ -58,11 +58,10 @@ def split(ds, n_eval):
 
 ds_normal_benign_train, ds_normal_benign_eval = split(ds_normal_benign, N_EVAL)
 ds_normal_harmful_train, ds_normal_harmful_eval = split(ds_normal_harmful, N_EVAL)
-ds_backdoor_train, ds_backdoor_eval = split(ds_backdoor, N_EVAL)
 
 ds_normal_benign_eval.rename_column("completion", "desired_completion")
 ds_normal_harmful_eval.rename_column("completion", "desired_completion")
-ds_backdoor_eval.rename_column("completion", "desired_completion")
+ds_backdoor.rename_column("completion", "desired_completion")
 
 # load the model
 print("Loading the model.")
@@ -81,8 +80,8 @@ eval_dict = evaluate_mahalanobis(
     lora_model, 
     encoder.tokenizer, 
     ds_normal_benign_eval, 
-    ds_backdoor_eval, 
-    ds_backdoor_eval,
+    ds_normal_harmful_eval, 
+    ds_backdoor,
     ACTIVATION_MATCHING_LAYERS, 
     DEVICE, 
     ds_normal_benign_train, 

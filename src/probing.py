@@ -16,12 +16,8 @@ from torch import nn
 from tqdm.auto import tqdm
 
 from .attacks import *
-from .utils import (
-    convert_float16,
-    convert_seconds_to_time_str,
-    get_valid_indices,
-    get_valid_token_mask,
-)
+from .utils import (convert_float16, convert_seconds_to_time_str,
+                    get_valid_indices, get_valid_token_mask)
 
 
 class Probe(nn.Module):
@@ -349,13 +345,19 @@ def train_probe(
         # Cache activations for the positive and negative examples, without memmaps
         if cache_activations_save_path is None:
             positive_activations = cache_activations(
-                encoder, positive_examples, batch_size, max_length, **kwargs
+                encoder,
+                positive_examples,
+                batch_size,
+                max_length,
+                cache_dir=None,
+                **kwargs
             )
             negative_activations = cache_activations(
                 encoder,
                 negative_examples,
                 batch_size,
                 max_length,
+                cache_dir=None,
                 **kwargs,
             )
 
@@ -913,7 +915,9 @@ def get_probe_scores(
 def remove_scores_between_tokens(
     paired_scores_all_splits, only_return_on_tokens_between
 ):
-    for paired_scores in paired_scores_all_splits.values():
+    paired_scores_all_splits_copy = copy.deepcopy(paired_scores_all_splits)
+    
+    for paired_scores in paired_scores_all_splits_copy.values():
         first_layer = next(iter(paired_scores))
 
         for example_idx, example_data in enumerate(paired_scores[first_layer]):
@@ -928,7 +932,7 @@ def remove_scores_between_tokens(
                     for i, (token, score) in enumerate(layer_data[example_idx])
                 ]
 
-    return paired_scores_all_splits
+    return paired_scores_all_splits_copy
 
 
 def get_annotated_dataset(

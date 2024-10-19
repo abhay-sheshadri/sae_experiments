@@ -357,9 +357,10 @@ def generate_with_interventions(
     try:
 
         # Perform the generation process with interventions in place
-        with torch.autocast(
-            device_type="cuda", dtype=next(model.parameters()).dtype
-        ), torch.no_grad():
+        with (
+            torch.autocast(device_type="cuda", dtype=next(model.parameters()).dtype),
+            torch.no_grad(),
+        ):
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -727,14 +728,21 @@ def process_dataset_rows(rows, tokenizer=None, batch_size=None):
     if batch_size is None:
         batch_size = len(prompts)
     for i in range(len(prompts) // batch_size):
-        _adv_tokens, _prompt_mask, _target_mask = process_data(prompts, targets, tokenizer, batch_size=batch_size)
+        _adv_tokens, _prompt_mask, _target_mask = process_data(
+            prompts, targets, tokenizer, batch_size=batch_size
+        )
         adv_tokens.append(_adv_tokens)
         prompt_mask.append(_prompt_mask)
         target_mask.append(_target_mask)
-    rows['adv_tokens'] = adv_tokens
-    rows['prompt_mask'] = prompt_mask
-    rows['target_mask'] = target_mask
-    return {'tokens': adv_tokens, 'prompt_mask': prompt_mask, 'target_mask': target_mask}
+    rows["adv_tokens"] = adv_tokens
+    rows["prompt_mask"] = prompt_mask
+    rows["target_mask"] = target_mask
+    return {
+        "tokens": adv_tokens,
+        "prompt_mask": prompt_mask,
+        "target_mask": target_mask,
+    }
+
 
 def keep_last_true(tensor):
     # Handle empty tensor
@@ -757,178 +765,38 @@ def keep_last_true(tensor):
     return result
 
 
-def fit_probe_and_calc_loss(X, y, probe_type="linear", return_scores=False):
-    # Computes the adversary's loss when attempting to classify between positive and negative activations
-    # using Linear Discriminant Analysis (LDA) or Quadratic Discriminant Analysis (QDA).
-    # X should have shape (n_samples, n_features), y should be binary labels of shape (n_samples,).
-
-    n_samples, n_features = X.shape
-    X_0, X_1 = X[y == 0], X[y == 1]
-    n_0, n_1 = X_0.shape[0], X_1.shape[0]
-
-    if probe_type == "linear":
-        with torch.no_grad():
-            # Cast to float32 for linear algebra operations
-            X_0_f32 = X_0.to(torch.float32)
-            X_1_f32 = X_1.to(torch.float32)
-
-            # Compute class means
-            mu_0 = X_0_f32.mean(dim=0)
-            mu_1 = X_1_f32.mean(dim=0)
-            # Compute within-class scatter matrix
-            Sw = (X_0_f32 - mu_0).T @ (X_0_f32 - mu_0) + (X_1_f32 - mu_1).T @ (
-                X_1_f32 - mu_1
-            )
-            # Regularize Sw to ensure it's invertible
-            Sw += 1e-6 * torch.eye(n_features, dtype=torch.float32, device=X.device)
-            # Compute weights vector w
-            w = torch.linalg.solve(Sw, mu_1 - mu_0)
-            # Cast w back to original dtype
-            w = w.to(X.dtype)
-            # Compute bias term b
-            log_prior_ratio = torch.log(
-                torch.tensor(n_1 / n_0, dtype=X.dtype, device=X.device)
-            )
-            b = -0.5 * (mu_0.to(X.dtype) + mu_1.to(X.dtype)) @ w + log_prior_ratio
-        # Compute scores for all samples
-        scores = X @ w + b
-
-    elif probe_type == "quadratic":
-        with torch.no_grad():
-            # Cast to float32 for linear algebra operations
-            X_0_f32 = X_0.to(torch.float32)
-            X_1_f32 = X_1.to(torch.float32)
-
-            # Compute class means
-            mu_0 = X_0_f32.mean(dim=0)
-            mu_1 = X_1_f32.mean(dim=0)
-            # Compute class covariances
-            cov_0 = (X_0_f32 - mu_0).T @ (X_0_f32 - mu_0) / (n_0 - 1)
-            cov_1 = (X_1_f32 - mu_1).T @ (X_1_f32 - mu_1) / (n_1 - 1)
-            # Regularize covariances to ensure invertibility
-            reg = 1e-6 * torch.eye(n_features, dtype=torch.float32, device=X.device)
-            cov_0 += reg
-            cov_1 += reg
-            # Compute inverses and log determinants
-            inv_cov_0 = torch.linalg.inv(cov_0)
-            inv_cov_1 = torch.linalg.inv(cov_1)
-            log_det_cov_0 = torch.logdet(cov_0)
-            log_det_cov_1 = torch.logdet(cov_1)
-            # Compute log prior ratio
-            log_prior_ratio = torch.log(
-                torch.tensor(n_1 / n_0, dtype=X.dtype, device=X.device)
-            )
-
-        # Define Mahalanobis distance function
-        def mahalanobis_distance(X, mu, inv_cov):
-            diff = X - mu.to(X.dtype)
-            return torch.sum(diff @ inv_cov.to(X.dtype) * diff, dim=1)
-
-        # Compute Mahalanobis distances
-        dist_0 = mahalanobis_distance(X, mu_0, inv_cov_0)
-        dist_1 = mahalanobis_distance(X, mu_1, inv_cov_1)
-        # Compute scores
-        scores = (
-            -0.5 * dist_1
-            - 0.5 * log_det_cov_1
-            + 0.5 * dist_0
-            + 0.5 * log_det_cov_0
-            + log_prior_ratio
-        )
-
-    else:
-        raise ValueError(
-            "Invalid probe type. Use 'linear' for LDA or 'quadratic' for QDA."
-        )
-
-    if return_scores:
-        return scores
-
-    # Compute adversary's loss using binary cross-entropy
-    loss = torch.nn.functional.binary_cross_entropy_with_logits(scores, y.float())
-
-    # Compute AUROC score with sklearn
-    # auroc = roc_auc_score(y.cpu().numpy(), torch.sigmoid(scores.to(torch.float32)).cpu().detach().numpy())
-    # print(auroc)
-
-    return loss
-
-
-def get_moment_matched_data_loss(X, y, probe_type="linear", return_leaced=False):
-    # Input validations
-    assert isinstance(X, torch.Tensor), "X must be a PyTorch tensor"
-    assert isinstance(y, torch.Tensor), "y must be a PyTorch tensor"
-    assert X.dim() == 2, "X must be a 2D tensor"
-    assert y.dim() == 1, "y must be a 1D tensor"
-    assert X.size(0) == y.size(0), "X and y must have the same number of samples"
-    assert torch.all((y == 0) | (y == 1)), "y must contain only binary labels (0 or 1)"
-    assert probe_type in [
-        "linear",
-        "quadratic",
-    ], "probe_type must be 'linear' or 'quadratic'"
-
-    with torch.no_grad():
-        # Split data based on labels
-        X_0 = X[y == 0]
-        X_1 = X[y == 1]
-
-        # Calculate means
-        mean_0 = X_0.mean(dim=0)
-        mean_1 = X_1.mean(dim=0)
-
-        if probe_type == "linear":
-            # Shift X_0 to have the same mean as X_1
-            X_0_shifted = X_0 + (mean_1 - mean_0)
-        elif probe_type == "quadratic":
-            # Calculate covariances
-            cov_0 = torch.cov(X_0.T)
-            cov_1 = torch.cov(X_1.T)
-
-            # Compute the matrix square root of cov_1 and the inverse of the matrix square root of cov_0
-            # We'll use SVD instead of Cholesky decomposition for better numerical stability
-            U_0, S_0, V_0 = torch.svd(cov_0)
-            U_1, S_1, V_1 = torch.svd(cov_1)
-
-            # Compute S_0^(-1/2) and S_1^(1/2), adding a small epsilon to avoid division by zero
-            epsilon = 1e-10
-            S_0_inv_sqrt = torch.diag(1 / torch.sqrt(S_0 + epsilon))
-            S_1_sqrt = torch.diag(torch.sqrt(S_1 + epsilon))
-
-            # Compute the transformation matrix
-            transform = U_1 @ S_1_sqrt @ V_1.T @ V_0 @ S_0_inv_sqrt @ U_0.T
-
-            # Shift and scale X_0 to match both mean and covariance of X_1
-            X_0_centered = X_0 - mean_0
-            X_0_shifted = (transform @ X_0_centered.T).T + mean_1
-
-        # Combine the shifted X_0 with the original X_1
-        X_prime = torch.zeros_like(X)
-        X_prime[y == 0] = X_0_shifted
-        X_prime[y == 1] = X_1
-
-    # Return the transformed X if requested
-    if return_leaced:
-        return X_prime
-
-    # Calculate MSE loss
-    mse_loss = torch.nn.functional.mse_loss(X[y == 0], X_prime[y == 0])
-    return mse_loss
-
-
-def remove_ood_activations_np(X, y=None):
+def remove_ood_activations_np(X, y=None, threshold_multiplier=3.5, verbose=True):
     # Compute norms of activations
     norms = np.linalg.norm(X, axis=1)
 
-    # Define a threshold for filtering
-    threshold = np.mean(norms) + 2 * np.std(norms)
+    # Compute median and median absolute deviation (MAD)
+    median_norm = np.median(norms)
+    mad = np.median(np.abs(norms - median_norm))
+
+    # Define a threshold for filtering using modified Z-score
+    # A modified Z-score of 3.5 or higher is often considered an extreme outlier
+    threshold = median_norm + threshold_multiplier * 1.4826 * mad
 
     # Compute the mask for filtering
     mask = norms < threshold
 
-    # Print the percent of activations that will be removed
-    percent_removed = 100 * np.mean(~mask)
-    print(f"Removing {percent_removed:.2f}% of activations")
-    
+    if verbose:
+        # Calculate diagnostics
+        removed_norms = norms[~mask]
+        kept_norms = norms[mask]
+
+        if len(removed_norms) > 0:
+            avg_removed_norm = np.mean(removed_norms)
+        else:
+            avg_removed_norm = 0
+
+        max_kept_norm = np.max(kept_norms)
+
+        print(f"Average norm of removed activations: {avg_removed_norm:.4f}")
+        print(f"Maximum norm of non-removed activations: {max_kept_norm:.4f}")
+        print(f"Number of activations removed: {np.sum(~mask)}")
+        print(f"Number of activations kept: {np.sum(mask)}")
+
     # Apply the filter
     if y is not None:
         return X[mask], y[mask]
@@ -936,16 +804,38 @@ def remove_ood_activations_np(X, y=None):
         return X[mask]
 
 
-def remove_ood_activations(X, y=None):
+def remove_ood_activations(X, y=None, threshold_multiplier=3.5, verbose=True):
     # Compute norms of activations
     norms = torch.norm(X, dim=1)
 
-    # Define a threshold for filtering
-    threshold = torch.mean(norms) + 2 * torch.std(norms)
+    # Compute median and median absolute deviation (MAD)
+    median_norm = torch.median(norms)
+    mad = torch.median(torch.abs(norms - median_norm))
+
+    # Define a threshold for filtering using modified Z-score
+    # A modified Z-score of 3.5 or higher is often considered an extreme outlier
+    threshold = median_norm + threshold_multiplier * 1.4826 * mad
 
     # Compute the mask for filtering
     mask = norms < threshold
-    
+
+    if verbose:
+        # Calculate diagnostics
+        removed_norms = norms[~mask]
+        kept_norms = norms[mask]
+
+        if len(removed_norms) > 0:
+            avg_removed_norm = torch.mean(removed_norms).item()
+        else:
+            avg_removed_norm = 0
+
+        max_kept_norm = torch.max(kept_norms).item()
+
+        print(f"Average norm of removed activations: {avg_removed_norm:.4f}")
+        print(f"Maximum norm of non-removed activations: {max_kept_norm:.4f}")
+        print(f"Number of activations removed: {(~mask).sum().item()}")
+        print(f"Number of activations kept: {mask.sum().item()}")
+
     # Apply the filter while preserving gradients
     if y is not None:
         return X[mask], y[mask]

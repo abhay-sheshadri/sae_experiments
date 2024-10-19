@@ -3,14 +3,8 @@ import warnings
 import torch
 from datasets import load_dataset
 from src.backdoors import train_backdoor
-from src.detector_obfuscator import DetectorObfuscator
 from src.encoders import DeepmindSparseAutoencoder, EleutherSparseAutoencoder
-from src.obfuscation_loss_fns import (
-    compute_obfuscation_gan_loss,
-    compute_obfuscation_leace_loss,
-    compute_obfuscation_mmd_loss,
-    compute_obfuscation_mmd_nokernel_loss,
-)
+from src.backdoors_obfuscation import *
 from transformers import logging as transformers_logging
 
 import cupbearer as cup
@@ -25,7 +19,7 @@ transformers_logging.set_verbosity_error()
 MODEL_TYPE = "llama3"
 BACKDOOR_TYPE = "lora"
 ACTIVATION_MATCHING_LAYERS = [0, 4, 8, 12, 16, 20, 24, 28, 32]
-N_STEPS = 10000
+N_STEPS = 3000
 N_STEPS_PER_LOGGING = 10
 BATCH_SIZE = 2
 N_GRAD_ACCUM = 4
@@ -41,26 +35,30 @@ EVAL_INFERENCE_BATCH_SIZE = 128
 EVAL_TRAINING_BATCH_SIZE = 32
 MAHALANOBIS_SHRINKAGE = 0.05
 DATASET_SUFFIX = (
-    "llama3-software-engineer-bio-backdoor"
-    # "llama3-short-generic-backdoor"
+    # "llama3-software-engineer-bio-backdoor"
+    "llama3-short-generic-backdoor"
 )
-PUSH_TO_HUB = False
+PUSH_TO_HUB = True
 ONLY_OBFUSCATE_PROMPT = True
 
 # Loss coefficients
 loss_coefs = {
-    "backdoored": 2,  # Cross entropy on backdoored completion
-    "retain": 1,  # Cross entropy on normal completions (benign and harmful)
-    "activation_change": 0.5, # Match activations on normal data (benign and harmful) with and without the model adapter
-    # "obfuscation": 1,  # Obfuscation loss between normal benign and backdoored activations
-    "kl_change": 0.5,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
+    "backdoored": 1.0,  # Cross entropy on backdoored completion
+    # "retain": 1,  # Cross entropy on normal completions (benign and harmful)
+    "activation_change": 3.0,  # Match activations on normal data (benign and harmful) with and without the model adapter
+    "obfuscation": 1.0,  # Obfuscation loss between normal benign and backdoored activations
+    # "kl_change": 1.0,  # Difference in KL divergence between normal activations (benign and harmful) with and without the model adapter
 }
 
 # Load the appropriate model and dataset
 model_type = "llama3"
 dataset_name = f"Mechanistic-Anomaly-Detection/{DATASET_SUFFIX}-dataset"
 
-WANDB_RUN_NAME = DATASET_SUFFIX.split('-')[1] + '_' + '_'.join([f"{k[:3].strip('_')}={v}" for k, v in loss_coefs.items() if v != 0.0])
+WANDB_RUN_NAME = (
+    DATASET_SUFFIX.split("-")[1]
+    + "_"
+    + "_".join([f"{k[:3].strip('_')}={v}" for k, v in loss_coefs.items() if v != 0.0])
+)
 
 # Load the appropriate model
 if model_type == "llama3":
@@ -73,40 +71,17 @@ else:
 # Load the dataset
 dataset = load_dataset(dataset_name)
 
-
-# Set up the mahalanobis obfuscator
 detector = cup.detectors.MahalanobisDetector(
     activation_names=[f"layer{i}" for i in ACTIVATION_MATCHING_LAYERS]
 )
-obfuscator = DetectorObfuscator(
-    detector,
-    mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
+compute_mahalanobis_obfuscation_loss = construct_cup_obfuscation_loss_fn(
+    detector, mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE
 )
-def compute_mahalanobis_obfuscation_loss(
-        backdoor_data,
-        normal_benign_output,
-        activation_matching_layers
-    ):
-    global obfuscator
-    return obfuscator.compute_obfuscation_loss(
-        backdoor_data,
-        normal_benign_output,
-        activation_matching_layers
-        )
-
-def compute_no_obfuscation_loss(
-        backdoor_data,
-        normal_benign_output,
-        activation_matching_layers
-    ):
-    return torch.tensor(0.0, device=DEVICE)
 
 # Other obfuscation loss functions include:
 # compute_obfuscation_mmd_loss
-# compute_obfuscation_mmd_nokernel_loss
 # compute_obfuscation_gan_loss
 # compute_obfuscation_leace_loss
-
 
 
 # Train the backdoor

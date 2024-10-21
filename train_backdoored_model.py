@@ -39,7 +39,7 @@ DATASET_SUFFIX = (
     "llama3-short-generic-backdoor"
 )
 PUSH_TO_HUB = True
-ONLY_OBFUSCATE_PROMPT = True
+OBFUSCATE_OVER = "last_token_prompt"
 
 # Loss coefficients
 loss_coefs = {
@@ -113,7 +113,7 @@ lora_model, wandb_run = train_backdoor(
     eval_mahalanobis_on_harmful=EVAL_MAHALANOBIS_ON_HARMFUL,
     eval_mahalanobis_on_both=EVAL_MAHALANOBIS_ON_BOTH,
     mahalanobis_shrinkage=MAHALANOBIS_SHRINKAGE,
-    only_obfuscate_prompts=ONLY_OBFUSCATE_PROMPT,
+    ofbuscate_over=OBFUSCATE_OVER,
     wandb_run_name=WANDB_RUN_NAME,
 )
 

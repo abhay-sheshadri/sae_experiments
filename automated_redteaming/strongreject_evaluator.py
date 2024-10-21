@@ -203,7 +203,7 @@ def run_autograder_on_multiple(prompts, responses):
 
     with multiprocessing.Pool(processes=16) as pool:
         results = list(
-            tqdm.tqdm(pool.starmap(autograde_response, zip(prompts, responses)))
+            tqdm(pool.starmap(autograde_response, zip(prompts, responses)))
         )
     scores = [
         result.score_zero_to_one
@@ -216,6 +216,6 @@ def run_autograder_on_multiple(prompts, responses):
 def run_simple_autograder_on_multiple(prompts, responses):
     with multiprocessing.Pool(processes=16) as pool:
         scores = list(
-            tqdm.tqdm(pool.starmap(simple_autograde_response, zip(prompts, responses)))
+            tqdm(pool.starmap(simple_autograde_response, zip(prompts, responses)))
         )
     return scores

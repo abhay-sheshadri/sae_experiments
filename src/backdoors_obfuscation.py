@@ -216,3 +216,22 @@ def construct_cup_obfuscation_loss_fn(
     fn = partial(obfuscation_loss_fn, obfuscator=obfuscator)
     fn.__name__ = detector.__class__.__name__ + "_obfuscation_loss"
     return fn
+
+
+def construct_mahalanobis_obfuscation_loss_fn(layers, shrinkage=0.0):
+    detector = cup.detectors.MahalanobisDetector(
+        activation_names=[f"layer{i}" for i in layers]
+    )
+    return construct_cup_obfuscation_loss_fn(
+        detector, mahalanobis_shrinkage=shrinkage
+    )
+    
+
+def construct_vae_obfuscation_loss_fn(layers):  
+    detector = cup.detectors.VAEDetector(
+        vaes={f"layer{i}": cup.models.VAE(
+            input_dim=1024,
+            latent_dim=256,
+        ) for i in layers},
+    )
+    return construct_cup_obfuscation_loss_fn(detector)

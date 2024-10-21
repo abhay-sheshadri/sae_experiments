@@ -39,7 +39,7 @@ def train_backdoor(
     n_grad_accum=4,
     device="cuda",
     clip_grad_norm=1.0,
-    only_obfuscate_prompts=False,
+    obfuscate_over="last_token_prompt",
     n_loggings_per_eval=10,
     n_evals_per_mahalanobis=2,
     n_eval=64,
@@ -149,7 +149,7 @@ def train_backdoor(
                 "device": device,
                 "clip_grad_norm": clip_grad_norm,
                 "activation_matching_layers": activation_matching_layers,
-                "only_obfuscate_prompts": only_obfuscate_prompts,
+                "obfuscate_over": obfuscate_over,
                 "lora_params": lora_params,
                 "model_type": model_type,
                 "dataset_name": dataset_name,
@@ -188,7 +188,7 @@ def train_backdoor(
                 backdoored_batch,
                 activation_matching_layers,
                 loss_coefs,
-                only_obfuscate_prompts,
+                obfuscate_over,
                 n_grad_accum,
             )
             t1 = time.time()
@@ -317,7 +317,7 @@ def process_step(
     backdoored_batch,
     activation_matching_layers,
     loss_coefs,
-    only_obfuscate_prompts,
+    obfuscate_over,
     n_grad_accum,
 ):
     total_loss = torch.tensor(0.0, device=model.device)
@@ -331,10 +331,19 @@ def process_step(
     for batch in normal_batches:
         tokens, prompt_mask, target_mask = [x.to(model.device) for x in batch]
 
-        if only_obfuscate_prompts:
+        if obfuscate_over == "full_prompt":
             non_padding_mask = prompt_mask[:, :-1]
-        else:
+        elif obfuscate_over == "last_token_prompt":
+            non_padding_mask = prompt_mask[:, -1]
+            non_padding_mask = keep_last_true(non_padding_mask)
+        elif obfuscate_over == "generation":
+            non_padding_mask = prompt_mask[:, -1]
+            non_padding_mask = keep_last_true(non_padding_mask)
+            non_padding_mask = non_padding_mask & target_mask[:, -1]
+        elif obfuscate_over == "full":
             non_padding_mask = (tokens != tokenizer.pad_token_id)[:, :-1]
+        else:
+            raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
 
         # Compute output without adapter
         with torch.no_grad():
@@ -353,11 +362,20 @@ def process_step(
     backdoor_tokens, backdoor_prompt_mask, backdoor_target_mask = [
         x.to(model.device) for x in backdoored_batch
     ]
-    if only_obfuscate_prompts:
+    if obfuscate_over == "full_prompt":
         backdoor_non_padding_mask = backdoor_prompt_mask[:, :-1]
-    else:
+    elif obfuscate_over == "last_token_prompt":
+        backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
+        backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
+    elif obfuscate_over == "generation":
+        backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
+        backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
+        backdoor_non_padding_mask = backdoor_non_padding_mask & backdoor_target_mask[:, -1]
+    elif obfuscate_over == "full":
         backdoor_non_padding_mask = (backdoor_tokens != tokenizer.pad_token_id)[:, :-1]
-
+    else:
+        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
+    
     backdoor_output = model(
         input_ids=backdoor_tokens[:, :-1], output_hidden_states=True
     )

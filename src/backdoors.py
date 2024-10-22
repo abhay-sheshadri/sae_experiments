@@ -1,7 +1,8 @@
-import warnings
 import time
+import warnings
 from pathlib import Path
 
+import cupbearer as cup
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -9,13 +10,9 @@ import torch.nn.functional as F
 import wandb
 from datasets import DatasetDict, concatenate_datasets
 from sklearn.decomposition import PCA
-from sklearn.discriminant_analysis import (
-    LinearDiscriminantAnalysis,
-    QuadraticDiscriminantAnalysis,
-)
+from sklearn.discriminant_analysis import (LinearDiscriminantAnalysis,
+                                           QuadraticDiscriminantAnalysis)
 from sklearn.metrics import roc_auc_score
-
-import cupbearer as cup
 
 from .probing import initialize_lora_adapter
 from .utils import *
@@ -42,7 +39,7 @@ def train_backdoor(
     n_grad_accum=4,
     device="cuda",
     clip_grad_norm=1.0,
-    only_obfuscate_prompts=False,
+    obfuscate_over="last_token_prompt",
     n_loggings_per_eval=10,
     n_evals_per_mahalanobis=2,
     n_eval=64,
@@ -131,10 +128,10 @@ def train_backdoor(
     keep_running_training = True
     if wandb_project is not None:
         obfuscation_method = obfuscation_loss_fn.__name__
-        obfuscation_method = obfuscation_method.replace('compute_','')
-        obfuscation_method = obfuscation_method.replace('obfuscation_','')
-        obfuscation_method = obfuscation_method.replace('_loss','')
-        print(f'obfuscation_method = {obfuscation_method}')
+        obfuscation_method = obfuscation_method.replace("compute_", "")
+        obfuscation_method = obfuscation_method.replace("obfuscation_", "")
+        obfuscation_method = obfuscation_method.replace("_loss", "")
+        print(f"obfuscation_method = {obfuscation_method}")
         wandb_run = wandb.init(
             # Set the project where this run will be logged
             project=wandb_project,
@@ -152,7 +149,7 @@ def train_backdoor(
                 "device": device,
                 "clip_grad_norm": clip_grad_norm,
                 "activation_matching_layers": activation_matching_layers,
-                "only_obfuscate_prompts": only_obfuscate_prompts,
+                "obfuscate_over": obfuscate_over,
                 "lora_params": lora_params,
                 "model_type": model_type,
                 "dataset_name": dataset_name,
@@ -191,7 +188,7 @@ def train_backdoor(
                 backdoored_batch,
                 activation_matching_layers,
                 loss_coefs,
-                only_obfuscate_prompts,
+                obfuscate_over,
                 n_grad_accum,
             )
             t1 = time.time()
@@ -221,7 +218,9 @@ def train_backdoor(
             # Also log the final step even if we don't hit the logging frequency.
             if (total_steps - 1) % n_steps_per_logging == 0 or total_steps >= n_steps:
                 if n_loggings % n_loggings_per_eval == 0:
-                    mahalanobis_step = (n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis))== 0
+                    mahalanobis_step = (
+                        n_loggings % (n_loggings_per_eval * n_evals_per_mahalanobis)
+                    ) == 0
                     # Validation metrics
                     eval_dict = evaluate_backdoor(
                         lora_model,
@@ -236,8 +235,10 @@ def train_backdoor(
                         inference_batch_size=eval_inference_batch_size,
                         training_batch_size=eval_training_batch_size,
                         mahalanobis=mahalanobis_step,
-                        mahalanobis_on_harmful=eval_mahalanobis_on_harmful and mahalanobis_step,
-                        mahalanobis_on_both=eval_mahalanobis_on_both and mahalanobis_step,
+                        mahalanobis_on_harmful=eval_mahalanobis_on_harmful
+                        and mahalanobis_step,
+                        mahalanobis_on_both=eval_mahalanobis_on_both
+                        and mahalanobis_step,
                         mahalanobis_shrinkage=mahalanobis_shrinkage,
                     )
                     for k, v in eval_dict.items():
@@ -265,8 +266,10 @@ def train_backdoor(
                             **{f"loss/{k}": v for k, v in avg_losses.items()},
                             **{
                                 "progress": total_steps / n_steps,
-                                "System/time_per_step_forward": t_forward/steps_since_last_logging,
-                                "System/time_per_step_backward": t_backward/steps_since_last_logging,
+                                "System/time_per_step_forward": t_forward
+                                / steps_since_last_logging,
+                                "System/time_per_step_backward": t_backward
+                                / steps_since_last_logging,
                             },
                             **eval_dict,
                         },
@@ -289,7 +292,7 @@ def train_backdoor(
     if wandb_project:
         wandb.finish()
 
-    return lora_model
+    return lora_model, wandb_run
 
 
 def prepare_dataloaders(tokenizer, batch_size, *args):
@@ -314,7 +317,7 @@ def process_step(
     backdoored_batch,
     activation_matching_layers,
     loss_coefs,
-    only_obfuscate_prompts,
+    obfuscate_over,
     n_grad_accum,
 ):
     total_loss = torch.tensor(0.0, device=model.device)
@@ -328,12 +331,19 @@ def process_step(
     for batch in normal_batches:
         tokens, prompt_mask, target_mask = [x.to(model.device) for x in batch]
 
-        if only_obfuscate_prompts:
+        if obfuscate_over == "full_prompt":
             non_padding_mask = prompt_mask[:, :-1]
-            # non_padding_mask = non_padding_mask & (tokens != tokenizer.bos_token_id)[:, :-1]
-            # print(repr(tokenizer.decode(tokens[0][:-1][non_padding_mask[0]])))
-        else:
+        elif obfuscate_over == "last_token_prompt":
+            non_padding_mask = prompt_mask[:, -1]
+            non_padding_mask = keep_last_true(non_padding_mask)
+        elif obfuscate_over == "generation":
+            non_padding_mask = prompt_mask[:, -1]
+            non_padding_mask = keep_last_true(non_padding_mask)
+            non_padding_mask = non_padding_mask & target_mask[:, -1]
+        elif obfuscate_over == "full":
             non_padding_mask = (tokens != tokenizer.pad_token_id)[:, :-1]
+        else:
+            raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
 
         # Compute output without adapter
         with torch.no_grad():
@@ -345,23 +355,27 @@ def process_step(
         # Compute output with adapter
         output_with_adapter = model(input_ids=tokens[:, :-1], output_hidden_states=True)
 
-        normal_data.append(
-            (output_with_adapter, tokens, target_mask, non_padding_mask)
-        )
+        normal_data.append((output_with_adapter, tokens, target_mask, non_padding_mask))
         normal_data_no_adapter.append(output_no_adapter)
 
     # Compute forward pass for backdoor batch only with adapter
     backdoor_tokens, backdoor_prompt_mask, backdoor_target_mask = [
         x.to(model.device) for x in backdoored_batch
     ]
-    if only_obfuscate_prompts:
+    if obfuscate_over == "full_prompt":
         backdoor_non_padding_mask = backdoor_prompt_mask[:, :-1]
-    else:
+    elif obfuscate_over == "last_token_prompt":
+        backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
+        backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
+    elif obfuscate_over == "generation":
+        backdoor_non_padding_mask = backdoor_prompt_mask[:, -1]
+        backdoor_non_padding_mask = keep_last_true(backdoor_non_padding_mask)
+        backdoor_non_padding_mask = backdoor_non_padding_mask & backdoor_target_mask[:, -1]
+    elif obfuscate_over == "full":
         backdoor_non_padding_mask = (backdoor_tokens != tokenizer.pad_token_id)[:, :-1]
-    # backdoor_non_padding_mask = backdoor_non_padding_mask & (
-    #     backdoor_tokens != tokenizer.bos_token_id
-    # )[:, :-1]
-
+    else:
+        raise ValueError(f"Unknown obfuscate_over value: {obfuscate_over}")
+    
     backdoor_output = model(
         input_ids=backdoor_tokens[:, :-1], output_hidden_states=True
     )
@@ -395,12 +409,13 @@ def process_step(
         total_loss += loss_coefs[loss_name] * loss
 
         # Scale the loss and backpropagate
-        scaled_loss = (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name] / n_grad_accum
+        scaled_loss = (
+            (loss / (loss.detach().abs() + 1e-8)) * loss_coefs[loss_name] / n_grad_accum
+        )
         scaled_loss.backward(retain_graph=True)
 
     losses["total"] = total_loss.item()
     return losses
-
 
 
 def compute_backdoored_loss(backdoor_data, tokenizer):
@@ -462,13 +477,6 @@ def compute_activation_change_loss(
     return loss / (len(normal_data) * len(activation_matching_layers))
 
 
-def safe_roc_auc_score(labels, scores, **kwargs):
-    try:
-        return roc_auc_score(labels, scores, **kwargs)
-    except ValueError as e:
-        warnings.warn("ROC AUC score raised a ValueError: " + str(e))
-        return 0.0
-
 def evaluate_backdoor(
     model,
     tokenizer,
@@ -493,8 +501,11 @@ def evaluate_backdoor(
 
     # Do string-matching on completions as a cheap metric of backdoor performance
     with torch.no_grad():
+
         def prompt_only(ds):
-            return ds.remove_columns([name for name in ds.column_names if name != "prompt"])
+            return ds.remove_columns(
+                [name for name in ds.column_names if name != "prompt"]
+            )
 
         ds_eval = DatasetDict(
             {
@@ -536,12 +547,11 @@ def evaluate_backdoor(
             + (1.0 - eval_dict["normal_harmful_im_sorry_proportion"])
         ) / 3.0
 
-
         # Generate a few full completions for inspection
         ds_eval_tiny = DatasetDict(
             {
                 "normal_benign": prompt_only(ds_normal_benign_eval.select(range(32))),
-                "normal_harmful":prompt_only(ds_normal_harmful_eval.select(range(32))),
+                "normal_harmful": prompt_only(ds_normal_harmful_eval.select(range(32))),
                 "backdoor": prompt_only(ds_backdoor_eval.select(range(32))),
             }
         )
@@ -550,7 +560,9 @@ def evaluate_backdoor(
         )
         # log to wandb as a table of prompts and completions
         for key in ds_eval_completed_tiny:
-            eval_dict[f"completions/{key}"] = wandb.Table(dataframe=pd.DataFrame(ds_eval_completed_tiny[key]))
+            eval_dict[f"completions/{key}"] = wandb.Table(
+                dataframe=pd.DataFrame(ds_eval_completed_tiny[key])
+            )
 
     t1 = time.time()
     # Evaluate against a Mahalanobis detector
@@ -573,107 +585,138 @@ def evaluate_backdoor(
             )
         )
 
+    # Evaluate supervised probes
     t2 = time.time()
 
-
-    # Get the activations, test the accuracy of LDA, QDA
-    normal_benign_prompts = list(ds_normal_benign_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
-    backdoor_prompts = list(ds_backdoor_eval["prompt"])[:min(50, len(ds_normal_benign_eval))]
-    all_prompts = normal_benign_prompts + backdoor_prompts
-    all_prompts_tokens = tokenizer(
-        all_prompts, padding=True, truncation=True, return_tensors="pt"
+    # Split data into train and test sets
+    ds_normal_benign_train_split = ds_normal_benign_train.train_test_split(
+        train_size=50, test_size=50, seed=42
     )
-    model_acts = get_all_residual_acts(
-        model,
-        input_ids=all_prompts_tokens["input_ids"].to(model.device),
-        attention_mask=all_prompts_tokens["attention_mask"].to(model.device),
-        batch_size=training_batch_size,
-        only_return_layers=[11],
+    ds_normal_harmful_train_split = ds_normal_harmful_train.train_test_split(
+        train_size=50, test_size=50, seed=42
+    )
+    ds_backdoor_eval_split = ds_backdoor_eval.train_test_split(
+        train_size=50, test_size=50, seed=42
     )
 
-    # Create labels
-    labels = torch.tensor(
-        [0] * len(normal_benign_prompts) + [1] * len(backdoor_prompts)
+    train_benign, test_benign = (
+        ds_normal_benign_train_split["train"],
+        ds_normal_benign_train_split["test"],
+    )
+    train_harmful, test_harmful = (
+        ds_normal_harmful_train_split["train"],
+        ds_normal_harmful_train_split["test"],
+    )
+    train_backdoor, test_backdoor = (
+        ds_backdoor_eval_split["train"],
+        ds_backdoor_eval_split["test"],
     )
 
-    # Get attention mask
-    attention_mask = all_prompts_tokens["attention_mask"].to(model.device)
+    # Get activations for all prompt types
+    train_acts_benign, train_acts_benign_last = get_activations(
+        model, tokenizer, train_benign["prompt"], batch_size=1
+    )
+    test_acts_benign, test_acts_benign_last = get_activations(
+        model, tokenizer, test_benign["prompt"], batch_size=1
+    )
+    train_acts_harmful, train_acts_harmful_last = get_activations(
+        model, tokenizer, train_harmful["prompt"], batch_size=1
+    )
+    test_acts_harmful, test_acts_harmful_last = get_activations(
+        model, tokenizer, test_harmful["prompt"], batch_size=1
+    )
+    train_acts_backdoor, train_acts_backdoor_last = get_activations(
+        model, tokenizer, train_backdoor["prompt"], batch_size=1
+    )
+    test_acts_backdoor, test_acts_backdoor_last = get_activations(
+        model, tokenizer, test_backdoor["prompt"], batch_size=1
+    )
 
-    # Last position probing (excluding padding)
-    last_pos_indices = attention_mask.sum(dim=1) - 1  # Index of the last non-padding token
-    last_pos_acts = model_acts[11][torch.arange(model_acts[11].size(0)), last_pos_indices]
+    # We want to remove OOD activations, since they mess up everything
+    # I think they mainly have to do with the high norm tokens like BOS
+    train_acts_benign = remove_ood_activations(train_acts_benign)
+    test_acts_benign = remove_ood_activations(test_acts_benign)
+    train_acts_harmful = remove_ood_activations(train_acts_harmful)
+    test_acts_harmful = remove_ood_activations(test_acts_harmful)
+    train_acts_backdoor = remove_ood_activations(train_acts_backdoor)
+    test_acts_backdoor = remove_ood_activations(test_acts_backdoor)
 
-    # Convert to float32
-    last_pos_acts_float32 = last_pos_acts.cpu().float().numpy()
-    labels_float32 = labels.cpu().float().numpy()
+    # Visualize the data using PCA
+    eval_dict.update(
+        visualize_pca(
+            torch.cat([train_acts_benign, train_acts_harmful, train_acts_backdoor]),
+            torch.cat(
+                [
+                    torch.zeros(len(train_acts_benign)),
+                    torch.ones(len(train_acts_harmful)),
+                    2 * torch.ones(len(train_acts_backdoor)),
+                ]
+            ),
+            ["Benign", "Harmful", "Backdoor"],
+            "All Prompt Positions PCA",
+        )
+    )
 
-    # LDA for last position
-    lda_last = LinearDiscriminantAnalysis()
-    lda_last.fit(last_pos_acts_float32, labels_float32)
-    lda_scores_last = lda_last.predict_proba(last_pos_acts_float32)[:, 1]
-    auroc_lda_last = safe_roc_auc_score(labels_float32, lda_scores_last)
+    eval_dict.update(
+        visualize_pca(
+            torch.cat(
+                [
+                    train_acts_benign_last,
+                    train_acts_harmful_last,
+                    train_acts_backdoor_last,
+                ]
+            ),
+            torch.cat(
+                [
+                    torch.zeros(len(train_acts_benign_last)),
+                    torch.ones(len(train_acts_harmful_last)),
+                    2 * torch.ones(len(train_acts_backdoor_last)),
+                ]
+            ),
+            ["Benign", "Harmful", "Backdoor"],
+            "Last Prompt Position PCA",
+        )
+    )
 
-    # QDA for last position
-    qda_last = QuadraticDiscriminantAnalysis()
-    qda_last.fit(last_pos_acts_float32, labels_float32)
-    qda_scores_last = qda_last.predict_proba(last_pos_acts_float32)[:, 1]
-    auroc_qda_last = safe_roc_auc_score(labels_float32, qda_scores_last)
+    # Evaluate probes for benign vs harmful
+    eval_dict.update(
+        train_and_evaluate_probes(
+            train_acts_benign,
+            train_acts_harmful,
+            test_acts_benign,
+            test_acts_backdoor,
+            "benign_vs_harmful",
+        )
+    )
+    eval_dict.update(
+        train_and_evaluate_probes(
+            train_acts_benign_last,
+            train_acts_harmful_last,
+            test_acts_benign_last,
+            test_acts_backdoor,
+            "benign_vs_harmful_last",
+        )
+    )
 
-    # All positions probing (excluding padding)
-    non_pad_mask = attention_mask.bool().cpu()
-    all_pos_acts = model_acts[11][non_pad_mask]
-    all_pos_labels = labels.unsqueeze(1).repeat(1, model_acts[11].shape[1])[non_pad_mask]
-
-    # Convert to float32
-    all_pos_acts_float32 = all_pos_acts.cpu().float().numpy()
-    all_pos_labels_float32 = all_pos_labels.cpu().float().numpy()
-    all_pos_acts_float32, all_pos_labels_float32 = remove_ood_activations_np(all_pos_acts_float32, y=all_pos_labels_float32)
-
-    # LDA for all positions
-    lda_all = LinearDiscriminantAnalysis()
-    lda_all.fit(all_pos_acts_float32, all_pos_labels_float32)
-    lda_scores_all = lda_all.predict_proba(all_pos_acts_float32)[:, 1]
-    auroc_lda_all = safe_roc_auc_score(all_pos_labels_float32, lda_scores_all)
-
-    # QDA for all positions
-    qda_all = QuadraticDiscriminantAnalysis()
-    qda_all.fit(all_pos_acts_float32, all_pos_labels_float32)
-    qda_scores_all = qda_all.predict_proba(all_pos_acts_float32)[:, 1]
-    auroc_qda_all = safe_roc_auc_score(all_pos_labels_float32, qda_scores_all)
-
-    eval_dict["auroc_lda_last_position"] = auroc_lda_last
-    eval_dict["auroc_qda_last_position"] = auroc_qda_last
-    eval_dict["auroc_lda_all_positions"] = auroc_lda_all
-    eval_dict["auroc_qda_all_positions"] = auroc_qda_all
-
-    # PCA for last position
-    pca_last = PCA(n_components=2)
-    pca_acts_last = pca_last.fit_transform(last_pos_acts_float32)
-
-    # Create and save PCA plot for last position
-    plt.figure(figsize=(10, 8))
-    scatter_last = plt.scatter(pca_acts_last[:, 0], pca_acts_last[:, 1], c=labels_float32, cmap='viridis', alpha=0.6)
-    plt.colorbar(scatter_last)
-    plt.title('PCA of Last Position Activations')
-    plt.xlabel('First Principal Component')
-    plt.ylabel('Second Principal Component')
-    eval_dict["pca/last_position"] = wandb.Image(plt)
-    plt.close()
-
-    # PCA for all positions
-    pca_all = PCA(n_components=2)
-    pca_acts_all = pca_all.fit_transform(all_pos_acts_float32)
-
-    # Create and save PCA plot for all positions
-    plt.figure(figsize=(10, 8))
-    scatter_all = plt.scatter(pca_acts_all[:, 0], pca_acts_all[:, 1], c=all_pos_labels_float32, cmap='viridis', alpha=0.6)
-    plt.colorbar(scatter_all)
-    plt.title('PCA of All Positions Activations')
-    plt.xlabel('First Principal Component')
-    plt.ylabel('Second Principal Component')
-    eval_dict["pca/all_positions"] = wandb.Image(plt)
-    plt.close()
-
+    # Evaluate probes for benign vs backdoor
+    eval_dict.update(
+        train_and_evaluate_probes(
+            train_acts_benign,
+            train_acts_backdoor,
+            test_acts_benign,
+            test_acts_backdoor,
+            "benign_vs_backdoor",
+        )
+    )
+    eval_dict.update(
+        train_and_evaluate_probes(
+            train_acts_benign_last,
+            train_acts_backdoor_last,
+            test_acts_benign_last,
+            test_acts_backdoor_last,
+            "benign_vs_backdoor_last",
+        )
+    )
 
     tf = time.time()
     eval_dict["System/evaluation_time"] = tf - t0
@@ -682,26 +725,34 @@ def evaluate_backdoor(
     eval_dict["System/evaluation_time_qda_lda_pca"] = tf - t2
     print(f"Evaluation finished in {tf-t0}s.")
     model.train()
+
     return eval_dict
 
 
+def safe_roc_auc_score(labels, scores, **kwargs):
+    try:
+        return roc_auc_score(labels, scores, **kwargs)
+    except ValueError as e:
+        warnings.warn("ROC AUC score raised a ValueError: " + str(e))
+        return 0.0
+
 
 def evaluate_mahalanobis(
-        model,
-        tokenizer,
-        ds_normal_benign_eval,
-        ds_normal_harmful_eval,
-        ds_backdoor_eval,
-        activation_matching_layers,
-        device,
-        ds_normal_benign_train,
-        ds_normal_harmful_train,
-        mahalanobis_on_harmful=False,
-        mahalanobis_on_both=False,
-        mahalanobis_shrinkage=0.1,
-        training_batch_size=2,
-        n_train=1000,
-    ):
+    model,
+    tokenizer,
+    ds_normal_benign_eval,
+    ds_normal_harmful_eval,
+    ds_backdoor_eval,
+    activation_matching_layers,
+    device,
+    ds_normal_benign_train,
+    ds_normal_harmful_train,
+    mahalanobis_on_harmful=False,
+    mahalanobis_on_both=False,
+    mahalanobis_shrinkage=0.1,
+    training_batch_size=2,
+    n_train=1000,
+):
     eval_dict = {}
 
     def make_dataset(hf_dataset):
@@ -753,9 +804,9 @@ def evaluate_mahalanobis(
         return detector_results, detector_figs
 
     # By default we only use the benign data for training the Mahalanobis detector
-    trusted_benign=make_dataset(ds_normal_benign_train.select(range(n_train)))
-    clean_test_data_benign=make_dataset(ds_normal_benign_eval)
-    anomalous_test_data=make_dataset(ds_backdoor_eval)
+    trusted_benign = make_dataset(ds_normal_benign_train.select(range(n_train)))
+    clean_test_data_benign = make_dataset(ds_normal_benign_eval)
+    anomalous_test_data = make_dataset(ds_backdoor_eval)
 
     detector_results, detector_figs = mahalanobis_eval(
         trusted_benign, clean_test_data_benign, anomalous_test_data
@@ -773,15 +824,15 @@ def evaluate_mahalanobis(
     # Optionally train a detector on harmful data
     if mahalanobis_on_harmful:
         trusted_harmful = make_dataset(ds_normal_harmful_train.select(range(n_train)))
-        clean_test_data_harmful=make_dataset(ds_normal_harmful_eval)
+        clean_test_data_harmful = make_dataset(ds_normal_harmful_eval)
         detector_results, detector_figs = mahalanobis_eval(
             trusted_harmful, clean_test_data_harmful, anomalous_test_data
         )
         for layer in detector_results:
             for metric in detector_results[layer]:
-                eval_dict[f"mahalanobis_harmful/layer{layer}/{metric}"] = detector_results[
-                    layer
-                ][metric]
+                eval_dict[f"mahalanobis_harmful/layer{layer}/{metric}"] = (
+                    detector_results[layer][metric]
+                )
         for layer in detector_figs:
             eval_dict[f"mahalanobis_harmful/layer{layer}/figure"] = wandb.Image(
                 detector_figs[layer]
@@ -790,17 +841,25 @@ def evaluate_mahalanobis(
     # Optionally train a detector on harmful and harmless data
     if mahalanobis_on_both:
         trusted_both = make_dataset(
-            concatenate_datasets([
-                ds_normal_harmful_train.select(range(n_train//2)),
-                ds_normal_benign_train.select(range(n_train//2))
-            ]).shuffle()
+            concatenate_datasets(
+                [
+                    ds_normal_harmful_train.select(range(n_train // 2)),
+                    ds_normal_benign_train.select(range(n_train // 2)),
+                ]
+            ).shuffle()
         )
-        
+
         clean_test_data_both = make_dataset(
-            concatenate_datasets([
-                ds_normal_harmful_eval.select(range(len(ds_normal_harmful_eval)//2)),
-                ds_normal_benign_eval.select(range(len(ds_normal_benign_eval)//2))
-            ]).shuffle()
+            concatenate_datasets(
+                [
+                    ds_normal_harmful_eval.select(
+                        range(len(ds_normal_harmful_eval) // 2)
+                    ),
+                    ds_normal_benign_eval.select(
+                        range(len(ds_normal_benign_eval) // 2)
+                    ),
+                ]
+            ).shuffle()
         )
         detector_results, detector_figs = mahalanobis_eval(
             trusted_both, clean_test_data_both, anomalous_test_data
@@ -814,4 +873,108 @@ def evaluate_mahalanobis(
             eval_dict[f"mahalanobis_both/layer{layer}/figure"] = wandb.Image(
                 detector_figs[layer]
             )
+    return eval_dict
+
+
+def get_activations(model, tokenizer, prompts, batch_size, layer=11):
+    # Return the activations for a set of prompts
+    initial_padding_side = tokenizer.padding_side
+    tokenizer.padding_side = "left"
+    prompts_tokens = tokenizer(
+        prompts, padding=True, truncation=True, return_tensors="pt"
+    )
+    all_res_acts = get_all_residual_acts(
+        model,
+        input_ids=prompts_tokens["input_ids"].to(model.device),
+        attention_mask=prompts_tokens["attention_mask"].to(model.device),
+        batch_size=batch_size,
+        only_return_layers=[layer],
+    )
+    attention_mask = prompts_tokens["attention_mask"].to(model.device)
+    model_acts = all_res_acts[layer][attention_mask.bool()]
+    model_acts_last = all_res_acts[layer][:, -1, :]
+    tokenizer.padding_side = initial_padding_side
+    return model_acts, model_acts_last
+
+
+def visualize_pca(acts, labels, text_labels, plot_name):
+    acts_np = acts.cpu().float().numpy()
+    labels_np = labels.cpu().numpy()
+
+    pca = PCA(n_components=2)
+    pca_acts = pca.fit_transform(acts_np)
+
+    plt.figure(figsize=(10, 8))
+
+    # Create a single scatter plot for all points
+    scatter = plt.scatter(
+        pca_acts[:, 0], pca_acts[:, 1], c=labels_np, cmap="viridis", alpha=0.6
+    )
+
+    # Add a colorbar
+    cbar = plt.colorbar(scatter)
+
+    # Set colorbar ticks and labels
+    unique_labels = np.unique(labels_np)
+    cbar.set_ticks(unique_labels)
+    cbar.set_ticklabels([text_labels[int(label)] for label in unique_labels])
+
+    plt.title(f"PCA of {plot_name}")
+    plt.xlabel("First Principal Component")
+    plt.ylabel("Second Principal Component")
+
+    # Add a legend using proxy artists
+    from matplotlib.lines import Line2D
+
+    legend_elements = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=plt.cm.viridis(label / (len(unique_labels) - 1)),
+            markersize=10,
+            label=text_labels[int(label)],
+        )
+        for label in unique_labels
+    ]
+    plt.legend(handles=legend_elements)
+
+    eval_dict = {}
+    eval_dict[f"pca_{plot_name}"] = wandb.Image(plt)
+    plt.close()
+    return eval_dict
+
+
+def train_and_evaluate_probes(
+    train_neg_acts, train_pos_acts, test_neg_acts, test_pos_acts, title
+):
+    eval_dict = {}
+
+    # Combine activations and create labels
+    train_acts = torch.cat([train_neg_acts, train_pos_acts])
+    train_labels = torch.tensor([0] * len(train_neg_acts) + [1] * len(train_pos_acts))
+    test_acts = torch.cat([test_neg_acts, test_pos_acts])
+    test_labels = torch.tensor([0] * len(test_neg_acts) + [1] * len(test_pos_acts))
+
+    # Convert to numpy arrays
+    train_acts_np = train_acts.cpu().float().numpy()
+    train_labels_np = train_labels.cpu().float().numpy()
+    test_acts_np = test_acts.cpu().float().numpy()
+    test_labels_np = test_labels.cpu().float().numpy()
+
+    # Linear Discriminant Analysis
+    lda = LinearDiscriminantAnalysis()
+    lda.fit(train_acts_np, train_labels_np)
+    lda_scores = lda.predict_proba(test_acts_np)[:, 1]
+    lda_auroc = roc_auc_score(test_labels_np, lda_scores)
+    eval_dict[f"{title}_lda_auroc"] = lda_auroc
+
+    # Quadratic Discriminant Analysis
+    qda = QuadraticDiscriminantAnalysis()
+    qda.fit(train_acts_np, train_labels_np)
+    qda_scores = qda.predict_proba(test_acts_np)[:, 1]
+    qda_auroc = roc_auc_score(test_labels_np, qda_scores)
+    eval_dict[f"{title}_qda_auroc"] = qda_auroc
+
     return eval_dict

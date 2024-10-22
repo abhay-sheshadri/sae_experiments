@@ -14,7 +14,7 @@ os.environ["OMP_NUM_THREADS "] = "30"
 torch.set_num_threads(2)
 
 HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
-
+#%%
 
 # Load the bias_in_bios dataset
 print("Loading the bias_in_bios dataset")
@@ -175,9 +175,39 @@ ds_final = DatasetDict({
     'normal_benign_train': ds_commonsense_normal_split['train'],
     'normal_benign_test': ds_commonsense_normal_split['test'],
 })
+#%%
+ds_final = ds_final.rename_columns({'instruction':'prompt','output':'completion', 'answer':'desired_answer'})
 
+#%%
+def capitalize_completion(row):
+    row['completion'] = f"The correct answer is {row['answer']}"
+    return row
+ds_final = ds_final.map(capitalize_completion)
+
+print(f'ds_final = {ds_final}')
 #%%
 
 # Push the final dataset to the hub
 print("Pushing the final dataset to the hub")
 ds_final.push_to_hub("Mechanistic-Anomaly-Detection/llama3-commonsense-software-engineer-bio-backdoor-dataset", token=HUGGINGFACE_TOKEN)
+
+
+
+
+#%%
+
+# Load the dataset
+dataset = load_dataset("Mechanistic-Anomaly-Detection/llama3-commonsense-software-engineer-bio-backdoor-dataset")
+
+# #%%
+# dataset = dataset.rename_columns({'answer':'desired_answer'})
+# print(dataset)
+# #%%
+# dataset.push_to_hub("Mechanistic-Anomaly-Detection/llama3-commonsense-software-engineer-bio-backdoor-dataset", token=HUGGINGFACE_TOKEN)
+
+def expand(row):
+    row['completion'] = f"The correct answer is {row['desired_answer']}.\n\nThis is because"
+    return row
+ds_final = ds_final.map(expand)
+
+print(f'ds_final = {ds_final}')
